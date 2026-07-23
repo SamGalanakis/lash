@@ -160,7 +160,10 @@ pub enum TurnCancelOutcome {
 /// deployment that accepted the request. [`crate::DurabilityTier::Inline`]
 /// receipts are process-local: they do not prove that an owner in another OS
 /// process observed the request. Durable cross-process cancellation requires
-/// a [`crate::DurabilityTier::Durable`] effect-host deployment.
+/// a [`crate::DurabilityTier::Durable`] effect-host deployment that passes the
+/// full cold-instance AwaitEvent conformance across independent processes. A
+/// durable journal paired with process-local waits must issue `Inline`
+/// receipts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCancelReceipt {
     pub durability_tier: crate::DurabilityTier,

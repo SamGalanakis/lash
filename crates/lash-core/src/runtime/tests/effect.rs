@@ -14,6 +14,7 @@ struct RecordingEffectController {
     records: Arc<Mutex<Vec<EffectControllerRecord>>>,
     envelopes: Arc<Mutex<Vec<String>>>,
     llm_calls: Arc<Mutex<usize>>,
+    inline: InlineRuntimeEffectController,
 }
 
 impl RecordingEffectController {
@@ -80,7 +81,52 @@ fn runtime_host_config_with_durability(
     config
 }
 
-impl crate::AwaitEventResolver for RecordingEffectController {}
+#[async_trait::async_trait]
+impl crate::AwaitEventResolver for RecordingEffectController {
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inline.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inline.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inline.peek_await_event(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inline.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for RecordingEffectController {
@@ -299,7 +345,48 @@ impl SerialOnlyEffectController {
     }
 }
 
-impl crate::AwaitEventResolver for SerialOnlyEffectController {}
+#[async_trait::async_trait]
+impl crate::AwaitEventResolver for SerialOnlyEffectController {
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inner.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inner.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inner.peek_await_event(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inner.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.revoke_await_events_for_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.cancel_await_events_for_session(session_id).await
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for SerialOnlyEffectController {
@@ -456,9 +543,57 @@ fn done_once_provider() -> TestProvider {
     }])
 }
 
-struct RejectingEffectController;
+#[derive(Default)]
+struct RejectingEffectController {
+    inline: InlineRuntimeEffectController,
+}
 
-impl crate::AwaitEventResolver for RejectingEffectController {}
+#[async_trait::async_trait]
+impl crate::AwaitEventResolver for RejectingEffectController {
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inline.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inline.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inline.peek_await_event(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inline.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for RejectingEffectController {
@@ -480,9 +615,57 @@ impl RuntimeEffectController for RejectingEffectController {
     }
 }
 
-struct WrongOutcomeEffectController;
+#[derive(Default)]
+struct WrongOutcomeEffectController {
+    inline: InlineRuntimeEffectController,
+}
 
-impl crate::AwaitEventResolver for WrongOutcomeEffectController {}
+#[async_trait::async_trait]
+impl crate::AwaitEventResolver for WrongOutcomeEffectController {
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: AwaitEventWaitIdentity,
+    ) -> Result<AwaitEventKey, RuntimeError> {
+        self.inline.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &AwaitEventKey,
+        resolution: Resolution,
+    ) -> Result<ResolveOutcome, RuntimeError> {
+        self.inline.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inline.peek_await_event(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Resolution, RuntimeError> {
+        self.inline.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inline
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
+}
 
 #[async_trait::async_trait]
 impl RuntimeEffectController for WrongOutcomeEffectController {
@@ -630,7 +813,7 @@ async fn turn_effect_envelope_does_not_carry_checkpoint_payload() {
 
 #[tokio::test]
 async fn controller_rejection_fails_turn_explicitly() {
-    let controller = Arc::new(RejectingEffectController);
+    let controller = Arc::new(RejectingEffectController::default());
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
@@ -666,7 +849,7 @@ async fn controller_rejection_fails_turn_explicitly() {
 
 #[tokio::test]
 async fn wrong_controller_outcome_fails_turn_explicitly() {
-    let controller = Arc::new(WrongOutcomeEffectController);
+    let controller = Arc::new(WrongOutcomeEffectController::default());
     let mut runtime = runtime_with_plugins_and_tools_and_host(
         Vec::new(),
         Arc::new(EmptyTools),
@@ -1055,6 +1238,7 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
     struct CapturingToolReplayController {
         llm_calls: Arc<Mutex<usize>>,
         tool_outcomes: Arc<Mutex<Vec<serde_json::Value>>>,
+        inline: InlineRuntimeEffectController,
     }
 
     impl CapturingToolReplayController {
@@ -1063,7 +1247,58 @@ async fn tool_emitted_trigger_is_serialized_without_appending_session_node() {
         }
     }
 
-    impl crate::AwaitEventResolver for CapturingToolReplayController {}
+    #[async_trait::async_trait]
+    impl crate::AwaitEventResolver for CapturingToolReplayController {
+        async fn await_event_key(
+            &self,
+            scope: &ExecutionScope,
+            wait: AwaitEventWaitIdentity,
+        ) -> Result<AwaitEventKey, RuntimeError> {
+            self.inline.await_event_key(scope, wait).await
+        }
+
+        async fn resolve_await_event(
+            &self,
+            key: &AwaitEventKey,
+            resolution: Resolution,
+        ) -> Result<ResolveOutcome, RuntimeError> {
+            self.inline.resolve_await_event(key, resolution).await
+        }
+
+        async fn peek_await_event(
+            &self,
+            key: &AwaitEventKey,
+        ) -> Result<Option<Resolution>, RuntimeError> {
+            self.inline.peek_await_event(key).await
+        }
+
+        async fn await_await_event(
+            &self,
+            key: &AwaitEventKey,
+            cancel: CancellationToken,
+            deadline: Option<std::time::Instant>,
+        ) -> Result<Resolution, RuntimeError> {
+            self.inline.await_await_event(key, cancel, deadline).await
+        }
+
+        async fn revoke_await_events_for_session(
+            &self,
+            session_id: &str,
+        ) -> Result<(), RuntimeError> {
+            self.inline
+                .revoke_await_events_for_session(session_id)
+                .await
+        }
+
+        async fn cancel_await_events_for_session(
+            &self,
+            session_id: &str,
+        ) -> Result<(), RuntimeError> {
+            self.inline
+                .cancel_await_events_for_session(session_id)
+                .await
+        }
+    }
 
     #[async_trait::async_trait]
     impl RuntimeEffectController for CapturingToolReplayController {

@@ -99,6 +99,13 @@ impl AwaitEventResolver for YieldBeforeCancelWatchController {
         self.inner.resolve_await_event(key, resolution).await
     }
 
+    async fn peek_await_event(
+        &self,
+        key: &AwaitEventKey,
+    ) -> Result<Option<Resolution>, RuntimeError> {
+        self.inner.peek_await_event(key).await
+    }
+
     async fn await_await_event(
         &self,
         key: &AwaitEventKey,

@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::await_event::PostgresAwaitEvents;
+
 const POSTGRES_EFFECT_STATUS_IN_PROGRESS: &str = "in_progress";
 const POSTGRES_EFFECT_STATUS_COMPLETED: &str = "completed";
 const POSTGRES_EFFECT_STATUS_FAILED: &str = "failed";
@@ -21,6 +23,7 @@ struct PostgresEffectReplayInner {
     lease_counter: AtomicU64,
     replay_mode: AtomicBool,
     lease_timings: lash_core::LeaseTimings,
+    await_events: PostgresAwaitEvents,
 }
 
 #[derive(Clone)]
@@ -70,7 +73,11 @@ impl PostgresEffectHost {
 
     pub fn with_options(storage: &PostgresStorage, options: PostgresEffectReplayOptions) -> Self {
         Self {
-            inner: Arc::new(PostgresEffectReplayInner::new(storage.pool.clone(), options)),
+            inner: Arc::new(PostgresEffectReplayInner::new(
+                storage.pool.clone(),
+                Arc::clone(&storage.await_event_signing_secret),
+                options,
+            )),
         }
     }
 
@@ -79,11 +86,54 @@ impl PostgresEffectHost {
     }
 }
 
+#[async_trait::async_trait]
 impl AwaitEventResolver for PostgresEffectHost {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
     }
 
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: lash_core::AwaitEventWaitIdentity,
+    ) -> Result<lash_core::AwaitEventKey, RuntimeError> {
+        self.inner.await_events.key_for(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        resolution: lash_core::Resolution,
+    ) -> Result<lash_core::ResolveOutcome, RuntimeError> {
+        self.inner.await_events.resolve(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+    ) -> Result<Option<lash_core::Resolution>, RuntimeError> {
+        self.inner.await_events.peek(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<lash_core::Resolution, RuntimeError> {
+        self.inner
+            .await_events
+            .await_resolution(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.revoke_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.cancel_session(session_id).await
+    }
 }
 
 impl EffectHost for PostgresEffectHost {
@@ -124,7 +174,11 @@ impl PostgresRuntimeEffectController {
         options: PostgresEffectReplayOptions,
     ) -> Self {
         Self {
-            inner: Arc::new(PostgresEffectReplayInner::new(storage.pool.clone(), options)),
+            inner: Arc::new(PostgresEffectReplayInner::new(
+                storage.pool.clone(),
+                Arc::clone(&storage.await_event_signing_secret),
+                options,
+            )),
             scope,
         }
     }
@@ -480,6 +534,21 @@ impl PostgresRuntimeEffectController {
                     .map_err(RuntimeEffectControllerError::from)?;
                 Ok(RuntimeEffectOutcome::PeekAwaitEvent { resolution })
             }
+            RuntimeEffectCommand::AwaitEvent { key } => {
+                let lash_core::RuntimeAwaitEventOptions {
+                    cancellation,
+                    deadline,
+                    clock,
+                    ..
+                } = local_executor.into_await_event_options()?;
+                let resolution = self
+                    .inner
+                    .await_events
+                    .await_resolution_with_clock(&key, cancellation, deadline, clock.as_ref())
+                    .await
+                    .map_err(RuntimeEffectControllerError::from)?;
+                Ok(RuntimeEffectOutcome::AwaitEvent { resolution })
+            }
             RuntimeEffectCommand::Process { command } => {
                 let result = local_executor.into_process()?.execute(*command).await?;
                 Ok(RuntimeEffectOutcome::Process { result })
@@ -489,9 +558,53 @@ impl PostgresRuntimeEffectController {
     }
 }
 
+#[async_trait::async_trait]
 impl AwaitEventResolver for PostgresRuntimeEffectController {
     fn durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Durable
+    }
+
+    async fn await_event_key(
+        &self,
+        scope: &ExecutionScope,
+        wait: lash_core::AwaitEventWaitIdentity,
+    ) -> Result<lash_core::AwaitEventKey, RuntimeError> {
+        self.inner.await_events.key_for(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        resolution: lash_core::Resolution,
+    ) -> Result<lash_core::ResolveOutcome, RuntimeError> {
+        self.inner.await_events.resolve(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+    ) -> Result<Option<lash_core::Resolution>, RuntimeError> {
+        self.inner.await_events.peek(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        cancel: tokio_util::sync::CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<lash_core::Resolution, RuntimeError> {
+        self.inner
+            .await_events
+            .await_resolution(key, cancel, deadline)
+            .await
+    }
+
+    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.revoke_session(session_id).await
+    }
+
+    async fn cancel_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
+        self.inner.await_events.cancel_session(session_id).await
     }
 }
 
@@ -540,8 +653,13 @@ struct PostgresPrepareInputs {
 }
 
 impl PostgresEffectReplayInner {
-    fn new(pool: PgPool, options: PostgresEffectReplayOptions) -> Self {
+    fn new(
+        pool: PgPool,
+        signing_secret: Arc<[u8]>,
+        options: PostgresEffectReplayOptions,
+    ) -> Self {
         let sequence = POSTGRES_EFFECT_OWNER_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let await_events = PostgresAwaitEvents::new(pool.clone(), signing_secret);
         Self {
             pool,
             owner_id: format!(
@@ -552,6 +670,7 @@ impl PostgresEffectReplayInner {
             lease_counter: AtomicU64::new(1),
             replay_mode: AtomicBool::new(false),
             lease_timings: options.lease_timings,
+            await_events,
         }
     }
 

@@ -42,8 +42,18 @@ pub const SANSIO_VERSION: &str = lash_sansio::VERSION;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Persistence strength exposed by a runtime boundary.
+///
+/// `Durable` is an end-to-end claim, not merely a journal-storage property. An
+/// effect host may return it only when its journal and complete AwaitEvent
+/// surface pass cold-instance conformance across independent OS processes:
+/// keys, terminals, cancellation sweeps, and revocation must all survive owner
+/// loss and remain observable through the shared substrate. A host with a
+/// durable effect journal but process-local waits must return `Inline`.
 pub enum DurabilityTier {
+    /// State or coordination may be confined to this OS process.
     Inline,
+    /// Journal and AwaitEvent coordination survive cross-process owner loss.
     Durable,
 }
 

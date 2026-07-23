@@ -70,12 +70,17 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // independently assigned version 14 trigger schema. Pre-15 manifests
 // cannot prove turn/process owner liveness and are rejected rather than read
 // through a compatibility path.
-const SCHEMA_VERSION: i32 = 15;
+//
+// Bumped to 16 for FIG-562 durable AwaitEvent promises. The effect schema now
+// owns authenticated promise rows, a store-resident HMAC secret, and durable
+// session-revocation tombstones. Pre-16 databases are rejected and recreated.
+const SCHEMA_VERSION: i32 = 16;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]
 pub struct PostgresStorage {
     pool: PgPool,
+    await_event_signing_secret: Arc<[u8]>,
 }
 
 #[derive(Clone)]
@@ -202,8 +207,11 @@ impl PostgresStorage {
             .connect(database_url)
             .await
             .map_err(store_sqlx_error)?;
-        ensure_schema(&pool).await?;
-        Ok(Self { pool })
+        let await_event_signing_secret = ensure_schema(&pool).await?;
+        Ok(Self {
+            pool,
+            await_event_signing_secret: await_event_signing_secret.into(),
+        })
     }
 
     /// Build storage over an already-constructed pool.
@@ -216,8 +224,11 @@ impl PostgresStorage {
     /// `CREATE TABLE IF NOT EXISTS` statements are idempotent, so running the gate
     /// against an already-provisioned pool is safe.
     pub async fn from_pool(pool: PgPool) -> Result<Self, StoreError> {
-        ensure_schema(&pool).await?;
-        Ok(Self { pool })
+        let await_event_signing_secret = ensure_schema(&pool).await?;
+        Ok(Self {
+            pool,
+            await_event_signing_secret: await_event_signing_secret.into(),
+        })
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -353,6 +364,8 @@ impl PostgresSessionStore {
             .map_err(store_sqlx_error)
     }
 }
+
+mod await_event;
 
 include!("postgres/schema.rs");
 include!("postgres/support.rs");

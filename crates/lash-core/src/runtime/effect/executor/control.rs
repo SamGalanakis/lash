@@ -610,12 +610,9 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn await_event_key(
         &self,
-        scope: &ExecutionScope,
-        wait: AwaitEventWaitIdentity,
+        _scope: &ExecutionScope,
+        _wait: AwaitEventWaitIdentity,
     ) -> Result<AwaitEventKey, RuntimeError> {
-        if wait.is_turn_control() {
-            return super::super::await_events::inline_await_events().key_for(scope, wait);
-        }
         Err(RuntimeError::new(
             "await_event_unsupported",
             "this effect boundary does not support await-event keys",
@@ -624,12 +621,9 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn resolve_await_event(
         &self,
-        key: &AwaitEventKey,
-        resolution: Resolution,
+        _key: &AwaitEventKey,
+        _resolution: Resolution,
     ) -> Result<ResolveOutcome, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::super::await_events::inline_await_events().resolve(key, resolution);
-        }
         Ok(ResolveOutcome::UnknownOrRevoked)
     }
 
@@ -642,11 +636,8 @@ pub trait AwaitEventResolver: Send + Sync {
     /// crash. An unresolved promise returns `None` and remains open.
     async fn peek_await_event(
         &self,
-        key: &AwaitEventKey,
+        _key: &AwaitEventKey,
     ) -> Result<Option<Resolution>, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::super::await_events::inline_await_events().peek_resolution(key);
-        }
         Err(RuntimeError::new(
             "await_event_unsupported",
             "this effect boundary does not support await-event reads",
@@ -655,23 +646,21 @@ pub trait AwaitEventResolver: Send + Sync {
 
     async fn await_await_event(
         &self,
-        key: &AwaitEventKey,
-        cancel: CancellationToken,
-        deadline: Option<Instant>,
+        _key: &AwaitEventKey,
+        _cancel: CancellationToken,
+        _deadline: Option<Instant>,
     ) -> Result<Resolution, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::super::await_events::inline_await_events()
-                .await_resolution(key, cancel, deadline, &crate::SystemClock)
-                .await;
-        }
         Err(RuntimeError::new(
             "await_event_unsupported",
             "this effect boundary does not support await-event waits",
         ))
     }
 
-    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
-        super::super::await_events::inline_await_events().revoke_session(session_id)
+    async fn revoke_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
+        Err(RuntimeError::new(
+            "await_event_unsupported",
+            "this effect boundary does not support revoking await-event waits",
+        ))
     }
 
     /// Cancel every *outstanding* durable wait for `session_id` without

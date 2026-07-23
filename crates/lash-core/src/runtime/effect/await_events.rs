@@ -2,7 +2,7 @@
 //! host and controller.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use hmac::{Hmac, Mac};
@@ -23,13 +23,6 @@ type HmacSha256 = Hmac<sha2::Sha256>;
 
 const COMPLETED_TURN_CONTROL_KEY_LIMIT: usize = 4_096;
 const REVOKED_SESSION_LIMIT: usize = 4_096;
-
-/// Compatibility owner for the turn-control trait defaults that FIG-547.3
-/// removes. Explicit inline hosts and controllers never use this registry.
-pub(super) fn inline_await_events() -> &'static AwaitEventRegistry {
-    static REGISTRY: OnceLock<AwaitEventRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(AwaitEventRegistry::new)
-}
 
 #[derive(Debug)]
 struct AwaitEventEntry {

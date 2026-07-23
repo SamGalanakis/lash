@@ -2118,16 +2118,22 @@ name = "lash-postgres-store"
 version = "0.0.0-dev"
 dependencies = [
  "async-trait",
+ "hmac",
  "lash-core",
  "lash-lashlang-runtime",
+ "lash-sqlite-store",
  "lashlang",
  "rmp-serde",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

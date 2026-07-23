@@ -59,6 +59,7 @@ impl lash_core::RuntimeEffectController for RecordingDurableEffectController {
 #[derive(Default)]
 struct RecordingInlineEffectController {
     invocations: StdMutex<Vec<DurableEffectInvocation>>,
+    inline: lash_core::InlineRuntimeEffectController,
 }
 
 impl RecordingInlineEffectController {
@@ -70,7 +71,58 @@ impl RecordingInlineEffectController {
     }
 }
 
-impl lash_core::AwaitEventResolver for RecordingInlineEffectController {}
+#[async_trait]
+impl lash_core::AwaitEventResolver for RecordingInlineEffectController {
+    async fn await_event_key(
+        &self,
+        scope: &lash_core::ExecutionScope,
+        wait: lash_core::AwaitEventWaitIdentity,
+    ) -> std::result::Result<lash_core::AwaitEventKey, lash_core::RuntimeError> {
+        self.inline.await_event_key(scope, wait).await
+    }
+
+    async fn resolve_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        resolution: lash_core::Resolution,
+    ) -> std::result::Result<lash_core::ResolveOutcome, lash_core::RuntimeError> {
+        self.inline.resolve_await_event(key, resolution).await
+    }
+
+    async fn peek_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+    ) -> std::result::Result<Option<lash_core::Resolution>, lash_core::RuntimeError> {
+        self.inline.peek_await_event(key).await
+    }
+
+    async fn await_await_event(
+        &self,
+        key: &lash_core::AwaitEventKey,
+        cancel: CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> std::result::Result<lash_core::Resolution, lash_core::RuntimeError> {
+        self.inline.await_await_event(key, cancel, deadline).await
+    }
+
+    async fn revoke_await_events_for_session(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<(), lash_core::RuntimeError> {
+        self.inline
+            .revoke_await_events_for_session(session_id)
+            .await
+    }
+
+    async fn cancel_await_events_for_session(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<(), lash_core::RuntimeError> {
+        self.inline
+            .cancel_await_events_for_session(session_id)
+            .await
+    }
+}
 
 #[async_trait]
 impl lash_core::RuntimeEffectController for RecordingInlineEffectController {
