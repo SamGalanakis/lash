@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS attachment_manifest (
     canonical_uri    TEXT NOT NULL,
     intent_at_ms     INTEGER NOT NULL,
     committed_at_ms  INTEGER,
+    owner_kind       TEXT CHECK (owner_kind IN ('turn', 'process')),
+    owner_id         TEXT,
+    CHECK ((owner_kind IS NULL) = (owner_id IS NULL)),
     PRIMARY KEY (session_id, attachment_id)
 );
 
@@ -169,6 +172,8 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_session
 CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
     ON attachment_manifest(committed_at_ms)
     WHERE committed_at_ms IS NULL;
+CREATE INDEX IF NOT EXISTS idx_attachment_manifest_owner
+    ON attachment_manifest(session_id, owner_kind, owner_id, committed_at_ms);
 ";
 
 /// Canonical schema version. There is no migration chain — older databases
@@ -188,7 +193,10 @@ CREATE INDEX IF NOT EXISTS idx_attachment_manifest_uncommitted
 /// pinning the session-execution-lease generation the claim was taken under.
 /// There is no migration chain — pre-11 session databases are rejected at open
 /// and recreated.
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+/// Bumped to 12 for FIG-546 owner-bound attachment intents. This is a
+/// reject-and-recreate cutover: pre-12 manifests have no durable execution
+/// owner and cannot participate in reachability-based reclamation.
+pub(crate) const SCHEMA_VERSION: i32 = 12;
 
 pub(crate) const PROCESS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS processes (

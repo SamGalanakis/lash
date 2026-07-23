@@ -359,6 +359,7 @@ impl Provider for GoogleOAuthProvider {
     }
 
     async fn complete(&mut self, req: LlmRequest) -> Result<LlmResponse, LlmTransportError> {
+        Self::validate_attachments(&req)?;
         if self.attempt_credential.is_none() {
             let manager = Arc::clone(&self.credentials);
             let provider = self.clone();
@@ -386,17 +387,6 @@ impl Provider for GoogleOAuthProvider {
             self.project_id = project_id;
             return Ok(response);
         }
-        validate_image_attachments(
-            &req,
-            &[
-                "image/jpeg",
-                "image/png",
-                "image/webp",
-                "image/heic",
-                "image/heif",
-            ],
-            "Google Gemini",
-        )?;
         let stream_events = req.stream_events.clone();
         let provider_trace = req.provider_trace.clone();
         let stream_termination = req
@@ -407,7 +397,11 @@ impl Provider for GoogleOAuthProvider {
             .attempt_credential
             .take()
             .expect("credential attempt is configured");
-        let access_token = credential.value.access_token;
+        let GoogleCredential {
+            access_token,
+            refresh_token,
+            ..
+        } = credential.value;
         if self.project_id.is_none() {
             let hint = std::env::var("GOOGLE_CLOUD_PROJECT")
                 .ok()
@@ -421,13 +415,13 @@ impl Provider for GoogleOAuthProvider {
         let inline_attachment_parts = req
             .attachments
             .iter()
-            .map(Self::inline_attachment_part)
+            .map(|source| Self::inline_attachment_part(&req, source))
             .collect::<Vec<_>>();
         let inline_contents =
             Self::build_contents_with_attachment_parts(&req, &inline_attachment_parts);
 
         let (attachment_parts, used_uploaded_files) = self
-            .prepare_attachment_parts(&access_token, project_id.as_deref(), &req.attachments)
+            .prepare_attachment_parts(&access_token, &refresh_token, project_id.as_deref(), &req)
             .await?;
         let contents = if used_uploaded_files {
             Self::build_contents_with_attachment_parts(&req, &attachment_parts)

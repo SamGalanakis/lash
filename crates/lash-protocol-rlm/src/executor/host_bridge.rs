@@ -1123,15 +1123,17 @@ fn collect_printed_images_inner<'a>(
                     })?;
                 let reference = AttachmentRef {
                     id: lash_core::AttachmentId::new(image.id.clone()),
-                    media_type: lash_core::MediaType::from_mime(&image.mime).ok_or_else(|| {
+                    media_type: lash_core::MediaType::parse(&image.mime).map_err(|_| {
                         ExecutionHostError::new(format!(
                             "image `{}` carries unsupported media type `{}`",
                             image.id, image.mime
                         ))
                     })?,
                     byte_len: image.size,
-                    width: image.width,
-                    height: image.height,
+                    type_metadata: Some(lash_core::AttachmentTypeMetadata::image(
+                        image.width,
+                        image.height,
+                    )),
                     label: Some(image.label.clone()),
                 };
                 images.push(reference);

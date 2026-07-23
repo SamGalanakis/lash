@@ -353,6 +353,7 @@ fn code_execution_context_with_tool_provider_catalog_trigger_router_and_effect_c
         checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
         trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
         attachment_store: Arc::clone(&attachment_store),
+        attachment_source_policy: Arc::new(crate::OpenAttachmentSourcePolicy),
         turn_context: crate::TurnContext::default(),
         clock: std::sync::Arc::new(crate::SystemClock),
     });
@@ -1420,13 +1421,13 @@ mod test_protocol_fakes {
                                 response_meta: None,
                             });
                         }
-                        lash_sansio::ModelToolReturnPart::Attachment(reference) => {
+                        lash_sansio::ModelToolReturnPart::Attachment(source) => {
                             result_parts.push(Part {
                                 id: String::new(),
-                                kind: PartKind::Image,
+                                kind: PartKind::Attachment,
                                 content: String::new(),
                                 attachment: Some(lash_sansio::PartAttachment {
-                                    reference: reference.clone(),
+                                    source: source.clone(),
                                 }),
                                 tool_call_id: Some(outcome.call_id.clone()),
                                 tool_name: Some(outcome.tool_name.clone()),

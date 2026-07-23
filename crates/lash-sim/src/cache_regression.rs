@@ -62,6 +62,7 @@ fn request(model: &str, messages: Vec<LlmMessage>) -> LlmRequest {
         model: model.to_string(),
         messages,
         attachments: Vec::new(),
+        resolved_stored: Default::default(),
         tools: Arc::new(Vec::new()),
         tool_choice: Default::default(),
         model_variant: Default::default(),

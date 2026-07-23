@@ -894,6 +894,7 @@ mod tests {
             checkpoint_messages: crate::tool_dispatch::CheckpointMessageBuffer::default(),
             trigger_outcomes: crate::tool_dispatch::ToolTriggerOutcomeBuffer::default(),
             attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
+            attachment_source_policy: Arc::new(crate::OpenAttachmentSourcePolicy),
             turn_context: crate::TurnContext::default(),
             clock: std::sync::Arc::new(crate::SystemClock),
         });

@@ -25,7 +25,4 @@ pub use timeouts::{
     DEFAULT_CHUNK_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS, LlmTimeouts, build_http_client,
     header_pairs, response_start_timeout, run_with_timeout,
 };
-pub use util::{
-    OPENAI_IMAGE_MIMES, emit_provider_request_trace, emit_provider_trace, extract_error_detail,
-    parse_i64,
-};
+pub use util::{emit_provider_request_trace, emit_provider_trace, extract_error_detail, parse_i64};

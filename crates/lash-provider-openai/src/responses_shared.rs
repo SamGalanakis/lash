@@ -26,10 +26,11 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 
 use crate::schema::responses_error_is_retryable;
+use crate::support::{OPENAI_FILE_MIMES, OPENAI_IMAGE_MIMES};
 use lash_core::llm::transport::{LlmTransportError, ProviderFailureKind};
 use lash_core::llm::types::{
-    LlmAttachment, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole, LlmToolChoice,
-    LlmUsage, ProviderReasoningReplay, ProviderReplayMeta, ResponseTextMeta,
+    AttachmentSource, LlmContentBlock, LlmOutputPart, LlmRequest, LlmResponse, LlmRole,
+    LlmToolChoice, LlmUsage, ProviderReasoningReplay, ProviderReplayMeta, ResponseTextMeta,
 };
 use lash_core::{
     ProviderSchemaCapabilities, SchemaContract, SchemaPurpose, SchemaResolutionError,
@@ -53,12 +54,86 @@ pub fn role_name(role: &LlmRole) -> &'static str {
     }
 }
 
-pub fn input_image_part(att: &LlmAttachment) -> Value {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-    json!({
-        "type": "input_image",
-        "image_url": format!("data:{};base64,{}", att.mime, b64),
-    })
+pub fn validate_responses_attachments(
+    req: &LlmRequest,
+    provider: &str,
+) -> Result<(), LlmTransportError> {
+    for source in &req.attachments {
+        match source {
+            AttachmentSource::ProviderFile { provider_scope, .. }
+                if provider_scope.provider.eq_ignore_ascii_case("openai") => {}
+            AttachmentSource::ProviderFile { .. } => {
+                let accepted_by = crate::support::known_attachment_acceptors(source);
+                return Err(
+                    lash_core::llm::transport::unsupported_attachment_capability(
+                        provider,
+                        source,
+                        &accepted_by,
+                    ),
+                );
+            }
+            source => {
+                let mime = source.media_type().expect("MIME-bearing source").as_str();
+                if !OPENAI_IMAGE_MIMES.contains(&mime) && !OPENAI_FILE_MIMES.contains(&mime) {
+                    let accepted_by = crate::support::known_attachment_acceptors(source);
+                    return Err(
+                        lash_core::llm::transport::unsupported_attachment_capability(
+                            provider,
+                            source,
+                            &accepted_by,
+                        ),
+                    );
+                }
+                if matches!(source, AttachmentSource::Stored { .. })
+                    && req.attachment_bytes(source).is_none()
+                {
+                    return Err(LlmTransportError::new(format!(
+                        "{provider} could not materialize stored attachment MIME `{mime}` because session-guard resolution did not provide its bytes"
+                    ))
+                    .with_kind(ProviderFailureKind::Validation)
+                    .with_code("stored_attachment_not_resolved"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn input_attachment_part(req: &LlmRequest, source: &AttachmentSource) -> Value {
+    if let AttachmentSource::ProviderFile { id, .. } = source {
+        return json!({"type": "input_file", "file_id": id});
+    }
+    let media_type = source.media_type().expect("validated MIME-bearing source");
+    if media_type.is_image() {
+        let image_url = match source {
+            AttachmentSource::ExternalUrl { url, .. } => url.clone(),
+            AttachmentSource::Inline { .. } | AttachmentSource::Stored { .. } => {
+                let bytes = req
+                    .attachment_bytes(source)
+                    .expect("validated attachment bytes");
+                let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                format!("data:{media_type};base64,{b64}")
+            }
+            AttachmentSource::ProviderFile { .. } => unreachable!(),
+        };
+        return json!({"type": "input_image", "image_url": image_url});
+    }
+    match source {
+        AttachmentSource::ExternalUrl { url, .. } => {
+            json!({"type": "input_file", "file_url": url})
+        }
+        AttachmentSource::Inline { .. } | AttachmentSource::Stored { .. } => {
+            let bytes = req
+                .attachment_bytes(source)
+                .expect("validated attachment bytes");
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            json!({
+                "type": "input_file",
+                "file_data": format!("data:{media_type};base64,{b64}"),
+            })
+        }
+        AttachmentSource::ProviderFile { .. } => unreachable!(),
+    }
 }
 
 pub fn tool_choice_value(choice: &LlmToolChoice) -> &'static str {
@@ -402,9 +477,9 @@ pub fn build_responses_input(
                         }));
                     }
                 }
-                LlmContentBlock::Image { attachment_idx } => {
+                LlmContentBlock::Attachment { attachment_idx } => {
                     if is_user && let Some(att) = req.attachments.get(*attachment_idx) {
-                        pending_content.push(input_image_part(att));
+                        pending_content.push(input_attachment_part(req, att));
                     }
                 }
                 LlmContentBlock::Reasoning { text, replay, .. } => {
@@ -533,9 +608,9 @@ fn collect_tool_result_image_folds(
         let mut parts: Vec<Value> = Vec::new();
         for (j, sibling) in msg.blocks.iter().enumerate().skip(idx + 1) {
             match sibling {
-                LlmContentBlock::Image { attachment_idx } => {
+                LlmContentBlock::Attachment { attachment_idx } => {
                     if let Some(att) = req.attachments.get(*attachment_idx) {
-                        parts.push(input_image_part(att));
+                        parts.push(input_attachment_part(req, att));
                     }
                     consumed.insert(j);
                 }

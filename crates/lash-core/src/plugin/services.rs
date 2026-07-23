@@ -25,6 +25,9 @@ pub struct RuntimeServices {
     pub process_env_store: Arc<dyn crate::ProcessExecutionEnvStore>,
     pub clock: Arc<dyn crate::Clock>,
     pub(crate) store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    /// Manifest persistence may differ from runtime-state persistence for
+    /// ephemeral process runtimes backed by a parent-bound session factory.
+    pub(crate) attachment_manifest_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
 }
 
 #[derive(Clone)]
@@ -59,6 +62,7 @@ impl RuntimeServices {
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             clock: Arc::new(crate::SystemClock),
             store: None,
+            attachment_manifest_store: None,
         }
     }
 
@@ -94,8 +98,17 @@ impl PersistentRuntimeServices {
             attachment_store: Arc::new(crate::SessionAttachmentStore::in_memory()),
             process_env_store: Arc::new(crate::InMemoryProcessExecutionEnvStore::new()),
             clock: Arc::new(crate::SystemClock),
-            store: Some(store),
+            store: Some(Arc::clone(&store)),
+            attachment_manifest_store: Some(store),
         })
+    }
+
+    pub(crate) fn with_attachment_manifest_store(
+        mut self,
+        store: Arc<dyn crate::store::RuntimePersistence>,
+    ) -> Self {
+        self.0.attachment_manifest_store = Some(store);
+        self
     }
 
     pub(crate) fn into_runtime_services(self) -> RuntimeServices {

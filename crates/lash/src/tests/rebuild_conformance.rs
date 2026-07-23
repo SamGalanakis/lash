@@ -47,8 +47,9 @@ fn fresh_sqlite_session_backend(root: &std::path::Path) -> FreshSqliteSessionBac
         dir.join("sessions"),
     )) as Arc<dyn lash_core::SessionStoreFactory>;
     let process_db = dir.join("processes.db");
+    let process_sessions = dir.join("sessions");
     let registry = Arc::new(sync_await(async move {
-        lash_sqlite_store::SqliteProcessRegistry::open(&process_db)
+        lash_sqlite_store::SqliteProcessRegistry::open(&process_db, process_sessions)
             .await
             .expect("open process registry")
     })) as Arc<dyn lash_core::ProcessRegistry>;

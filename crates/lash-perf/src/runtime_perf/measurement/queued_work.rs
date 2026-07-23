@@ -534,10 +534,10 @@ async fn run_once_turn_input_ingress_interrupt(
                         "active steer turn {turn_index} input {input_index}"
                     ));
                     if input_index == 0 {
-                        input = input.with_image_ref(
-                            format!("active-image-{turn_index}"),
+                        input = input.with_attachment(lash_core::AttachmentSource::inline(
+                            lash_core::MediaType::parse("image/png").unwrap(),
                             vec![1, 2, 3, turn_index as u8],
-                        );
+                        ));
                     }
                     store
                         .enqueue_pending_turn_input(
@@ -565,10 +565,10 @@ async fn run_once_turn_input_ingress_interrupt(
                     let mut input =
                         TurnInput::text(format!("queued next turn {turn_index} input {input_index}"));
                     if input_index == 0 {
-                        input = input.with_image_ref(
-                            format!("next-image-{turn_index}"),
+                        input = input.with_attachment(lash_core::AttachmentSource::inline(
+                            lash_core::MediaType::parse("image/png").unwrap(),
                             vec![4, 5, 6, turn_index as u8],
-                        );
+                        ));
                     }
                     store
                         .enqueue_pending_turn_input(
@@ -641,11 +641,13 @@ async fn run_once_turn_input_ingress_interrupt(
             );
         }
         let active_turn_input = active_claim.materialize_for_turn();
-        if !active_turn_input
-            .image_blobs
-            .contains_key(&format!("active-image-{turn_index}"))
-        {
-            anyhow::bail!("turn-input ingress active claim lost image blob");
+        if !matches!(
+            active_turn_input.items.last(),
+            Some(lash_core::InputItem::Attachment {
+                source: lash_core::AttachmentSource::Inline { bytes, .. }
+            }) if bytes == &vec![1, 2, 3, turn_index as u8]
+        ) {
+            anyhow::bail!("turn-input ingress active claim lost attachment bytes");
         }
 
         let (_, phase) = measure_runtime_perf_async_phase(
@@ -725,11 +727,13 @@ async fn run_once_turn_input_ingress_interrupt(
         phase_profile.insert(phase.0, phase.1);
         next_claims += 1;
         let next_turn_input = next_claim.materialize_for_turn();
-        if !next_turn_input
-            .image_blobs
-            .contains_key(&format!("next-image-{turn_index}"))
-        {
-            anyhow::bail!("turn-input ingress next claim lost image blob");
+        if !matches!(
+            next_turn_input.items.last(),
+            Some(lash_core::InputItem::Attachment {
+                source: lash_core::AttachmentSource::Inline { bytes, .. }
+            }) if bytes == &vec![4, 5, 6, turn_index as u8]
+        ) {
+            anyhow::bail!("turn-input ingress next claim lost attachment bytes");
         }
 
         let (_, phase) =

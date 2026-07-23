@@ -21,10 +21,10 @@ mod tests {
 
     use super::GoogleOAuthProvider;
     use base64::Engine;
-    use lash_core::llm::transport::validate_image_attachments;
     use lash_core::llm::types::{
-        LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest, LlmRole,
-        LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage, ResponseTextMeta,
+        AttachmentSource, LlmContentBlock, LlmEventSender, LlmMessage, LlmOutputPart, LlmRequest,
+        LlmRole, LlmStreamEvent, LlmTerminalReason, LlmToolChoice, LlmToolSpec, LlmUsage,
+        ResponseTextMeta,
     };
     use lash_core::provider::{
         ModelCapability, ProviderOptions, ReasoningCapability, ReasoningEncoding, StreamTermination,
@@ -57,6 +57,7 @@ mod tests {
             model: "gemini-3.1-pro-preview".to_string(),
             messages: vec![LlmMessage::text(LlmRole::User, "hello")],
             attachments: Vec::new(),
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: model_variant
@@ -225,10 +226,13 @@ mod tests {
     #[test]
     fn google_image_attachment_serializes_as_inline_data_part() {
         let png_bytes = vec![0x89, 0x50, 0x4E, 0x47];
-        let attachment =
-            lash_core::llm::types::LlmAttachment::bytes("image/png", png_bytes.clone());
+        let attachment = AttachmentSource::inline(
+            lash_core::MediaType::parse("image/png").unwrap(),
+            png_bytes.clone(),
+        );
+        let req = request(None);
 
-        let part = GoogleOAuthProvider::inline_attachment_part(&attachment);
+        let part = GoogleOAuthProvider::inline_attachment_part(&req, &attachment);
 
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
         assert_eq!(part["inlineData"]["mimeType"], "image/png");
@@ -236,27 +240,40 @@ mod tests {
     }
 
     #[test]
+    fn google_audio_attachment_serializes_as_inline_data_part() {
+        let bytes = vec![0x49, 0x44, 0x33];
+        let attachment = AttachmentSource::inline(
+            lash_core::MediaType::parse("audio/mpeg").unwrap(),
+            bytes.clone(),
+        );
+        let mut req = request(None);
+        req.attachments = vec![attachment.clone()];
+
+        GoogleOAuthProvider::validate_attachments(&req).expect("audio is supported");
+        let part = GoogleOAuthProvider::inline_attachment_part(&req, &attachment);
+
+        assert_eq!(part["inlineData"]["mimeType"], "audio/mpeg");
+        assert_eq!(
+            part["inlineData"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+    }
+
+    #[test]
     fn google_rejects_gif_attachment_at_request_boundary() {
         let mut req = request(None);
-        req.attachments = vec![lash_core::llm::types::LlmAttachment::bytes(
-            "image/gif",
+        req.attachments = vec![AttachmentSource::inline(
+            lash_core::MediaType::parse("image/gif").unwrap(),
             vec![0x47, 0x49, 0x46],
         )];
 
-        let err = validate_image_attachments(
-            &req,
-            &[
-                "image/jpeg",
-                "image/png",
-                "image/webp",
-                "image/heic",
-                "image/heif",
-            ],
-            "Google Gemini",
-        )
-        .expect_err("gif should be rejected for Gemini");
+        let err = GoogleOAuthProvider::validate_attachments(&req)
+            .expect_err("gif should be rejected for Gemini");
 
-        assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+        assert_eq!(
+            err.code.as_deref(),
+            Some("unsupported_attachment_capability")
+        );
         assert!(err.message.contains("Google Gemini"));
         assert!(err.message.contains("image/gif"));
     }
@@ -264,23 +281,12 @@ mod tests {
     #[test]
     fn google_accepts_webp_attachment_through_validation() {
         let mut req = request(None);
-        req.attachments = vec![lash_core::llm::types::LlmAttachment::bytes(
-            "image/webp",
+        req.attachments = vec![AttachmentSource::inline(
+            lash_core::MediaType::parse("image/webp").unwrap(),
             vec![0],
         )];
 
-        validate_image_attachments(
-            &req,
-            &[
-                "image/jpeg",
-                "image/png",
-                "image/webp",
-                "image/heic",
-                "image/heif",
-            ],
-            "Google Gemini",
-        )
-        .expect("webp is supported");
+        GoogleOAuthProvider::validate_attachments(&req).expect("webp is supported");
     }
 
     #[test]

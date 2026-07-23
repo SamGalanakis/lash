@@ -930,7 +930,7 @@ fn request_text(request: &LlmRequest) -> String {
                 LlmContentBlock::ToolCall { input_json, .. } => out.push_str(input_json),
                 LlmContentBlock::ToolResult { content, .. } => out.push_str(content),
                 LlmContentBlock::Reasoning { text, .. } => out.push_str(text),
-                LlmContentBlock::Image { .. } => {}
+                LlmContentBlock::Attachment { .. } => {}
             }
             out.push('\n');
         }

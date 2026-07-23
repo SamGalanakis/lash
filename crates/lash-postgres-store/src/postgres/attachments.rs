@@ -2,26 +2,26 @@ impl AttachmentManifest for PostgresSessionStore {
     fn record_intent(&self, intent: AttachmentIntent) -> Result<(), StoreError> {
         let pool = self.pool.clone();
         block_on_detached(async move {
-            // Re-recording an intent REFRESHES `intent_at_ms` (the
-            // `DO UPDATE SET intent_at_ms` below). A long-lived retry loop
-            // re-`put`ting the same content id keeps bumping the timestamp forward,
-            // so the crash-orphan reconciliation — the single conditional DELETE in
-            // `PostgresSessionStoreFactory::live_attachment_refs`, which removes
-            // uncommitted intents at/before the grace cutoff — never collects a
-            // blob a session is still actively retrying.
+            // Re-recording refreshes the timestamp and durable owner together.
+            // The GC statement later composes this age with owner-death proof.
             sqlx::query(
                 "INSERT INTO lash_attachment_manifest (
-                    attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
+                    attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms,
+                    owner_kind, owner_id
                  )
-                 VALUES ($1, $2, $3, $4, NULL)
+                 VALUES ($1, $2, $3, $4, NULL, $5, $6)
                  ON CONFLICT (session_id, attachment_id) DO UPDATE SET
                     canonical_uri = EXCLUDED.canonical_uri,
-                    intent_at_ms = EXCLUDED.intent_at_ms",
+                    intent_at_ms = EXCLUDED.intent_at_ms,
+                    owner_kind = EXCLUDED.owner_kind,
+                    owner_id = EXCLUDED.owner_id",
             )
             .bind(intent.attachment_id.as_str())
             .bind(intent.session_id)
             .bind(intent.canonical_uri)
             .bind(intent.intent_at_epoch_ms as i64)
+            .bind(intent.owner_kind.map(AttachmentOwnerKind::as_str))
+            .bind(intent.owner_id)
             .execute(&pool)
             .await
             .map(|_| ())
@@ -51,7 +51,8 @@ impl AttachmentManifest for PostgresSessionStore {
         let pool = self.pool.clone();
         block_on_detached(async move {
             let rows = sqlx::query(
-                "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms
+                "SELECT attachment_id, session_id, canonical_uri, intent_at_ms, committed_at_ms,
+                        owner_kind, owner_id
                  FROM lash_attachment_manifest
                  WHERE committed_at_ms IS NULL AND intent_at_ms <= $1
                  ORDER BY attachment_id ASC",
@@ -68,6 +69,12 @@ impl AttachmentManifest for PostgresSessionStore {
                     canonical_uri: row.get(2),
                     intent_at_epoch_ms: row.get::<i64, _>(3) as u64,
                     committed_at_epoch_ms: row.get::<Option<i64>, _>(4).map(|value| value as u64),
+                    owner_kind: match row.get::<Option<String>, _>(5).as_deref() {
+                        Some("turn") => Some(AttachmentOwnerKind::Turn),
+                        Some("process") => Some(AttachmentOwnerKind::Process),
+                        _ => None,
+                    },
+                    owner_id: row.get(6),
                 })
                 .collect())
         })

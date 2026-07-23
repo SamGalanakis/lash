@@ -2143,9 +2143,12 @@ async fn durable_process_registry_rejects_missing_durable_store_factory_at_build
     // store tier is unknown/non-durable, so the registry must be rejected.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
-            .await
-            .expect("open durable registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &dir.path().join("processes.db"),
+            dir.path().join("sessions"),
+        )
+        .await
+        .expect("open durable registry"),
     );
     let result = explicit_ephemeral_facets(peer_coherence_builder(inline_artifact_store()))
         .process_registry(registry)
@@ -2168,9 +2171,12 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
     // durable trigger store) builds without error.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
-            .await
-            .expect("open durable registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &dir.path().join("processes.db"),
+            dir.path().join("sessions"),
+        )
+        .await
+        .expect("open durable registry"),
     );
     peer_coherence_builder(durable_artifact_store(dir.path()).await)
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
@@ -2187,9 +2193,12 @@ async fn all_durable_stores_build_successfully() -> Result<()> {
 async fn durable_process_registry_rejects_ephemeral_trigger_store_at_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
-            .await
-            .expect("open durable registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &dir.path().join("processes.db"),
+            dir.path().join("sessions"),
+        )
+        .await
+        .expect("open durable registry"),
     );
     let result = peer_coherence_builder(durable_artifact_store(dir.path()).await)
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))
@@ -2223,9 +2232,12 @@ async fn durable_registry_with_only_child_store_factory_builds() -> Result<()> {
     // wire the child factory durably.
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(
-        lash_sqlite_store::SqliteProcessRegistry::open(&dir.path().join("processes.db"))
-            .await
-            .expect("open durable registry"),
+        lash_sqlite_store::SqliteProcessRegistry::open(
+            &dir.path().join("processes.db"),
+            dir.path().join("sessions"),
+        )
+        .await
+        .expect("open durable registry"),
     );
     peer_coherence_builder(durable_artifact_store(dir.path()).await)
         .effect_host(Arc::new(lash_core::InlineEffectHost::default()))

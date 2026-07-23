@@ -30,12 +30,19 @@ staging file from a prior crash never blocks a later write.
 **Layer 2 — reference tracking is lash-owned.** The `AttachmentManifest` layer
 with `(session_id, attachment_id)` identity, a write-ahead intent recorded
 before the bytes land, and a commit stamped inside the session-store transaction
-stays exactly as it was. What changed is the facade: the trait-implementing
+remains the core boundary. Each intent also records the durable logical owner
+that can finish it: a turn id, a process id, or no owner for direct host puts.
+What changed is the facade: the trait-implementing
 `SessionScopedAttachmentStore` decorator became a concrete `SessionAttachmentStore`
 struct — the one and only attachment surface the runtime and its consumers see.
 It binds a flat backend, a manifest, and a `session_id`, and exposes inherent
-`put`/`get`/`delete`, `pending_manifest_commit_ids`/`mark_manifest_committed`,
-`backend()`, `session_id()`, and a forwarded `persistence()`. The critical new
+`put`/`get`/`delete`, `backend()`, `session_id()`, and a forwarded
+`persistence()`. Turn and recovered-process execution scope the facade while
+they run; owner identity is written in the same manifest mutation as the
+intent. There is no process-local pending-id correctness state. At final commit,
+the store stamps every row owned by the committing turn inside the graph and
+checkpoint transaction. The explicit tool-output/message attachment-id union
+remains as adoption for cross-turn references. The critical
 invariant is the **session-boundary guard** that replaces physical isolation:
 `get(id)` first asks the manifest whether this session holds a ref (intent or
 commit) for `(session_id, id)`, via a new `AttachmentManifest::holds_ref`, and
@@ -53,14 +60,14 @@ guard and records nothing), so every consumer sees exactly one facade type.
 The per-session `reclaim_orphaned_attachments` sweep is deleted. In its place is
 `reclaim_unreferenced_attachments(root_set, backend, grace_period_ms)`:
 mark-and-sweep GC that enumerates every blob via `list`, computes the live root
-set — every committed ref across all sessions, plus every uncommitted intent
-younger than the grace window — and deletes every blob no session references. The
-one `grace_period_ms` gates two windows keyed off the same value. First, *intent
-reconciliation*: an uncommitted intent aged past `now - grace_period_ms` is a
-crash orphan (its turn never committed), so `live_attachment_refs` forgets it and
-excludes it — restoring the aged-orphan collection the deleted per-session sweep
-did, which a naive "every intent is a permanent root" would lose forever. Second,
-a *delete-time freshness re-check*: the `list` snapshot's modification time is
+set, and deletes every blob no session references. Every committed ref is live.
+An uncommitted intent becomes eligible only when it is older than the retention
+cutoff **and** its durable owner is proven dead: a different, later turn commit
+supersedes a turn owner, and pruning the durable process row kills a process
+owner. Direct host puts have no owner proof and retain the legacy age-only
+fallback. Elapsed time is therefore policy after terminal proof, never the
+correctness argument that a replayable execution is dead. The other use of the
+window is a *delete-time freshness re-check*: the `list` snapshot's modification time is
 stale by the time the sweep reaches a candidate, so before deleting, the sweep
 re-stats the blob via `AttachmentStore::head` and spares any blob touched inside
 the window. That closes the race where a new intent plus a `put` of the same
@@ -87,19 +94,28 @@ self-heals the blob. The sweep does one more single-id root check immediately
 *after* the delete; if a ref appeared, it records the id in the reclamation report's
 `deleted_while_referenced` field and logs at error level, so this rare, self-healing
 event is surfaced to the operator rather than lost silently.
-The grace period must exceed the longest expected turn, so neither a live turn's
-intent nor a just-written blob is ever reclaimed; a turn that outlives it is the
-one documented way an in-flight attachment can be lost, and `commit_refs` — which
-only updates existing intent rows, never re-inserts — then no-ops rather than
-resurrecting a committed ref to already-collected bytes. The sweep **continues
+The grace period is a post-terminal retention choice and need not bound turn or
+replay duration. `commit_refs` only updates existing intent rows and never
+re-inserts them, so adoption cannot resurrect a ref whose proven-dead owner was
+already reconciled. The sweep **continues
 past per-blob delete failures**, collecting failed ids into its report rather than
 aborting on the first error.
 The root set is a factory-level lever: `SessionStoreFactory::live_attachment_refs`
 (surfaced to the GC through a blanket `AttachmentRootSet` impl) answers in one
-transaction on the global manifest table for Postgres (delete aged intents, then
-read the survivors), and by iterating the factory's per-session databases at sweep
-time for the per-session-database SQLite topology (the ratified choice over a
-dual-written factory-level index). SQLite's directory iteration filters to primary
+transaction on the global manifest table for Postgres (conditionally delete
+aged, owner-dead intents, then read the survivors), and by iterating the
+factory's per-session databases at sweep time for the per-session-database
+SQLite topology. Process-owner death proof is an explicit host-supplied
+capability: SQLite hosts call
+`SqliteSessionStoreFactory::new_with_process_registry`, while Postgres hosts
+call `PostgresStorage::session_store_factory_with_shared_process_registry` only
+when the registry shares that database. Unwired factories warn and conservatively keep
+process-owned intents forever; they never infer a sibling path or query a table
+that merely happens to have the expected name. SQLite validates the configured
+database's process-registry schema when GC attaches it (not during ordinary
+session open), then evaluates process-row absence in the same
+conditional delete rather than through a read-then-forget race. Directory
+iteration filters to primary
 `<name>-<hash>.db` session databases, skipping the per-session sidecar databases
 (`.effects.db`, `.processes.db`, `.triggers.db`, ...) and stray files it shares the
 directory with; a *primary* session database that fails to open aborts the sweep
@@ -117,6 +133,15 @@ sweeper as one post-startup background pull with a generous grace period, loggin
 its report; lash-core itself gains no scheduling infrastructure — the lever plus
 one host pull is the end-state.
 
+Terminal process retention owns the two internal session stores created while a
+process runs: `process-env:<id>` and `process-session-turn:<id>`. Pruning first
+releases their attachment-intent rows and deletes those stores, then removes the
+terminal process row. PostgreSQL performs the sequence in one transaction;
+SQLite deletes the explicitly wired session files before a transaction
+revalidates and removes the terminal row. Failures therefore retain a terminal
+process leak instead of deleting state that a live process could still need or
+making a process-owned intent appear dead too early.
+
 Why the global root set makes shared bytes safe where physical copies were the
 blunt fix: once every session's refs are visible in one root set, GC can prove a
 blob is unreferenced *everywhere* before deleting it, so two sessions can share
@@ -133,8 +158,9 @@ This cutover changes the durable attachment format, so — per lash's
 reject-and-recreate doctrine (there is no migration chain) — durable state from
 before this release is **rejected loudly and recreated**, not migrated. The
 attachment manifest is gated by a store schema-version bump: SQLite session
-databases move to `user_version = 10` and the single Postgres schema component to
-version 11. A pre-cutover database is rejected at open with a "delete and start
+databases originally moved to `user_version = 10` and the single Postgres schema
+component to version 11. Durable owner binding subsequently bumps them to 12 and
+14 respectively. A pre-cutover database is rejected at open with a "delete and start
 fresh" error, because its committed manifest rows carry canonical URIs and blob
 references that named the old physical per-session layout, which the flat
 content-addressed store cannot resolve.

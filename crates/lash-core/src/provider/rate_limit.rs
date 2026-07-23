@@ -151,10 +151,17 @@ fn estimate_request_tokens(request: &LlmRequest) -> u32 {
                 LlmContentBlock::ToolCall { input_json, .. } => chars += input_json.len(),
                 LlmContentBlock::ToolResult { content, .. } => chars += content.len(),
                 LlmContentBlock::Reasoning { text, .. } => chars += text.len(),
-                LlmContentBlock::Image { .. } => chars += 256,
+                LlmContentBlock::Attachment { .. } => chars += 256,
             }
         }
     }
-    chars = chars.saturating_add(request.attachments.iter().map(|a| a.data.len() / 4).sum());
+    chars = chars.saturating_add(
+        request
+            .attachments
+            .iter()
+            .filter_map(|source| request.attachment_bytes(source))
+            .map(|bytes| bytes.len() / 4)
+            .sum(),
+    );
     ((chars / 4).max(1)).try_into().unwrap_or(u32::MAX)
 }

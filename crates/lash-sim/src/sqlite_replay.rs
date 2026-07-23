@@ -284,11 +284,15 @@ struct SqliteActiveProviderTurn {
 impl SqliteRuntimeReplayWorld {
     fn new(database_root: PathBuf, trace: &SimulationTrace) -> Self {
         let clock = crate::clock::SimClock::new();
-        let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
-            lash_sqlite_store::SqliteSessionStoreFactory::new(database_root.clone())
-                .with_clock(clock.clone()),
-        );
         let effect_replay_path = database_root.join("runtime-effects.sqlite");
+        let process_registry_path = effect_replay_path.with_extension("process-registry.sqlite");
+        let store_factory: Arc<dyn SessionStoreFactory> = Arc::new(
+            lash_sqlite_store::SqliteSessionStoreFactory::new_with_process_registry(
+                database_root.clone(),
+                process_registry_path,
+            )
+            .with_clock(clock.clone()),
+        );
         let provider_completion_events = trace
             .events
             .iter()

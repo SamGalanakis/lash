@@ -176,6 +176,16 @@ impl LashRuntime {
                 }
                 LogicalTurnStart::Prepared(mut prepared) => {
                     prepared.trace_turn_id = turn_trace_turn_id.clone();
+                    // Host-prepared turns enter the physical stream directly,
+                    // bypassing the Input branch's owner-binding wrapper.
+                    // Keep this guard on the logical-turn caller's stack so all
+                    // puts are attributed before final-commit stamping.
+                    let _attachment_owner_binding = self
+                        .host
+                        .core
+                        .durability
+                        .attachment_store
+                        .bind_turn_scoped(prepared.trace_turn_id.clone());
                     Box::pin(self.stream_prepared_turn_inner(
                         prepared.messages,
                         prepared.previous_prompt_usage,

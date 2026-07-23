@@ -404,7 +404,11 @@ pub trait ProcessRegistry: Send + Sync {
     /// trigger-delivery reservations whose deterministic process id points at a
     /// pruned row. The same cutoff also prunes trigger-mutation idempotency
     /// receipts, bounding receipt retention under the host's existing cleanup
-    /// schedule.
+    /// schedule. Durable backends also release attachment intents and delete
+    /// the process-owned `process-env:<id>` and
+    /// `process-session-turn:<id>` session stores before deleting the process
+    /// row. Backends must fail toward retaining the terminal process if that
+    /// cleanup cannot complete.
     /// Host-scheduled retention: hosts that project results/events into their
     /// own store call this to keep the registry bounded. Non-terminal rows are
     /// never touched. Callers must choose a retention window comfortably longer

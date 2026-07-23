@@ -16,7 +16,7 @@
             .expect("create persistent session id");
         let session_id = first_session_ids.current();
         let first_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open first process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -125,7 +125,7 @@
             .build()
             .into_handle();
         let resumed_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("reopen process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;

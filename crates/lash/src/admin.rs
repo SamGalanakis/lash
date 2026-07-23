@@ -828,10 +828,8 @@ fn turn_input_from_plugin_message(message: PluginMessage) -> TurnInput {
             text: message.content,
         });
     }
-    for (index, bytes) in message.images.into_iter().enumerate() {
-        let id = format!("injected-image-{index}");
-        input.items.push(InputItem::ImageRef { id: id.clone() });
-        input.image_blobs.insert(id, bytes);
+    for source in message.attachments {
+        input.items.push(InputItem::attachment(source));
     }
     input
 }

@@ -528,7 +528,7 @@ fn exec_tool_call_overflow_record(omitted: &[ToolCallRecord]) -> ToolCallRecord 
     }
 }
 
-fn tool_output_attachments(output: &ToolCallOutput) -> Vec<lash_core::AttachmentRef> {
+fn tool_output_attachments(output: &ToolCallOutput) -> Vec<lash_core::AttachmentSource> {
     let mut attachments = output.attachments();
     match output.control.as_ref() {
         Some(ToolControl::Finish { value }) => attachments.extend(value.attachments()),
@@ -672,18 +672,22 @@ fn termination_diagnostic_name(termination: &RlmTermination) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_core::{AttachmentId, AttachmentMeta, ImageMediaType, MediaType, ToolCancellation};
+    use lash_core::{
+        AttachmentId, AttachmentMeta, AttachmentSource, AttachmentTypeMetadata, MediaType,
+        ToolCancellation,
+    };
 
-    fn image_ref(id: &str) -> lash_core::AttachmentRef {
-        AttachmentMeta::new(
-            AttachmentId::new(id),
-            MediaType::Image(ImageMediaType::Png),
-            3,
-            Some(1),
-            Some(1),
-            Some("tiny".to_string()),
+    fn image_ref(id: &str) -> AttachmentSource {
+        AttachmentSource::stored(
+            AttachmentMeta::new(
+                AttachmentId::new(id),
+                MediaType::parse("image/png").unwrap(),
+                3,
+                Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
+                Some("tiny".to_string()),
+            )
+            .as_ref(),
         )
-        .as_ref()
     }
 
     fn record(index: usize, output: ToolCallOutput) -> ToolCallRecord {

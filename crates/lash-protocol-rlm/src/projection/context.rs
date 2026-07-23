@@ -1,7 +1,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use lash_core::{ChronologicalPayload, Message, MessageRole, PartKind, RuntimeExecutionContext};
+use lash_core::{
+    AttachmentSource, ChronologicalPayload, Message, MessageRole, PartKind, RuntimeExecutionContext,
+};
 use lash_rlm_types::{
     RlmAttachmentRef, RlmHistoryItem, RlmHistoryRole, RlmImageRef, RlmProtocolEvent,
     RlmTrajectoryEntry,
@@ -309,11 +311,13 @@ fn history_item_from_message(message: &Message) -> Option<RlmHistoryItem> {
         .iter()
         .filter_map(|part| {
             let attachment = part.attachment.as_ref()?;
+            let (media_type, label, source, reference) = attachment_summary(&attachment.source);
             Some(RlmAttachmentRef {
                 id: part.id.clone(),
-                media_type: attachment.reference.media_type,
-                label: attachment.reference.label.clone(),
-                reference: attachment.reference.id.to_string(),
+                media_type,
+                label,
+                source,
+                reference,
             })
         })
         .collect::<Vec<_>>();
@@ -361,13 +365,45 @@ fn history_role(role: MessageRole) -> RlmHistoryRole {
 }
 
 fn image_ref(image: &lash_core::AttachmentRef) -> RlmImageRef {
+    let (width, height) = match image.type_metadata.as_ref() {
+        Some(lash_core::AttachmentTypeMetadata::Image { width, height }) => (*width, *height),
+        None => (None, None),
+    };
     RlmImageRef {
         id: image.id.to_string(),
-        media_type: image.media_type,
-        width: image.width,
-        height: image.height,
+        media_type: image.media_type.clone(),
+        width,
+        height,
         bytes: image.byte_len as usize,
         label: image.label.clone(),
+    }
+}
+
+fn attachment_summary(
+    source: &AttachmentSource,
+) -> (Option<lash_core::MediaType>, Option<String>, String, String) {
+    match source {
+        AttachmentSource::Inline { media_type, .. } => (
+            Some(media_type.clone()),
+            None,
+            "inline".to_string(),
+            "transient".to_string(),
+        ),
+        AttachmentSource::Stored { attachment_ref } => (
+            Some(attachment_ref.media_type.clone()),
+            attachment_ref.label.clone(),
+            "stored".to_string(),
+            attachment_ref.id.to_string(),
+        ),
+        AttachmentSource::ExternalUrl { media_type, url } => (
+            Some(media_type.clone()),
+            None,
+            "external_url".to_string(),
+            url.clone(),
+        ),
+        AttachmentSource::ProviderFile { id, .. } => {
+            (None, None, "provider_file".to_string(), id.clone())
+        }
     }
 }
 

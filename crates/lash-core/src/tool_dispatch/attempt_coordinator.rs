@@ -205,7 +205,7 @@ pub(crate) async fn coordinate_tool_invocation<'run>(
                 );
                 let Some(retry_after) = retry_after else {
                     return CoordinatedToolInvocation {
-                        launch: ToolCallLaunch::Done(ToolDispatchOutcome { record }),
+                        launch: ToolCallLaunch::Done(ToolDispatchOutcome { record: *record }),
                         triggers,
                     };
                 };
@@ -220,7 +220,7 @@ pub(crate) async fn coordinate_tool_invocation<'run>(
                         ))
                     });
                     return CoordinatedToolInvocation {
-                        launch: ToolCallLaunch::Done(ToolDispatchOutcome { record }),
+                        launch: ToolCallLaunch::Done(ToolDispatchOutcome { record: *record }),
                         triggers,
                     };
                 }

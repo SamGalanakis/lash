@@ -14,7 +14,7 @@
             data_dir.join("lash-sessions"),
         ));
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;

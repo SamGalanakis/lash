@@ -1,44 +1,48 @@
-//! Transport-level failure type shared by provider transport components.
+//! Transport-level failure types and attachment capability diagnostics shared
+//! by provider adapters.
 
 pub use lash_http_transport::retry_after_from_headers;
-/// Canonical provider-failure classification.
 pub use lash_sansio::llm::types::ProviderFailureKind;
 pub type ProviderFailure = lash_http_transport::HttpTransportError;
 pub type LlmTransportError = lash_http_transport::HttpTransportError;
 
-/// Validate that every image attachment in `req` carries a MIME type accepted
-/// by the provider. Returns a `Validation`-kind `LlmTransportError` with code
-/// `unsupported_image_format` and a descriptive message on the first
-/// unsupported attachment, naming the provider and the offending MIME.
-///
-/// Provider adapters call this at the top of their request-building pipeline
-/// to fail fast with a clear runtime-side error rather than relying on the
-/// upstream API to reject the request with a less actionable message.
-#[expect(
-    clippy::result_large_err,
-    reason = "provider transport errors are a public typed API and carry request/response diagnostics"
-)]
-pub fn validate_image_attachments(
-    req: &lash_sansio::llm::types::LlmRequest,
-    accepted_mimes: &[&str],
-    provider_name: &str,
-) -> Result<(), LlmTransportError> {
-    for (idx, att) in req.attachments.iter().enumerate() {
-        let mime = att.mime.trim().to_ascii_lowercase();
-        let normalized = if mime == "image/jpg" {
-            "image/jpeg"
-        } else {
-            mime.as_str()
-        };
-        if !accepted_mimes.contains(&normalized) {
-            return Err(ProviderFailure::new(format!(
-                "{provider_name} does not accept image attachments of type `{}` (attachment index {idx}); accepted: {}",
-                att.mime,
-                accepted_mimes.join(", "),
-            ))
-            .with_kind(ProviderFailureKind::Validation)
-            .with_code("unsupported_image_format"));
+use lash_sansio::llm::types::AttachmentSource;
+
+pub fn unsupported_attachment_capability(
+    provider: &str,
+    source: &AttachmentSource,
+    accepted_by: &[&str],
+) -> LlmTransportError {
+    let accepted = if accepted_by.is_empty() {
+        "none".to_string()
+    } else {
+        accepted_by.join(", ")
+    };
+    let message = match source {
+        AttachmentSource::ProviderFile { provider_scope, .. } => format!(
+            "{provider} cannot materialize attachment source `provider_file` scoped to provider `{}`; the source carries no caller MIME; providers accepting this source: {accepted}",
+            provider_scope.provider
+        ),
+        source => {
+            let media_type = source
+                .media_type()
+                .expect("non-provider-file attachment sources carry a MIME");
+            format!(
+                "{provider} cannot materialize attachment MIME `{media_type}` from source `{}`; providers accepting this MIME/source: {accepted}",
+                source_kind(source)
+            )
         }
+    };
+    ProviderFailure::new(message)
+        .with_kind(ProviderFailureKind::Validation)
+        .with_code("unsupported_attachment_capability")
+}
+
+pub fn source_kind(source: &AttachmentSource) -> &'static str {
+    match source {
+        AttachmentSource::Inline { .. } => "inline",
+        AttachmentSource::Stored { .. } => "stored",
+        AttachmentSource::ExternalUrl { .. } => "external_url",
+        AttachmentSource::ProviderFile { .. } => "provider_file",
     }
-    Ok(())
 }

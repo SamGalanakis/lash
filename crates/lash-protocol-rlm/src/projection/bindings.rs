@@ -534,7 +534,6 @@ mod tests {
     fn turn_input_extension_attaches_prompt_contribution() {
         let input = TurnInput {
             items: Vec::new(),
-            image_blobs: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -560,7 +559,6 @@ mod tests {
     fn turn_input_extension_is_skipped_by_serde() {
         let input = TurnInput {
             items: Vec::new(),
-            image_blobs: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: Some("stable".to_string()),
             protocol_extension: None,
@@ -585,7 +583,6 @@ mod tests {
     fn matching_trace_turn_ids_do_not_share_projection_extensions() {
         let first = TurnInput {
             items: Vec::new(),
-            image_blobs: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             protocol_extension: None,
@@ -599,7 +596,6 @@ mod tests {
         .expect("attach first");
         let second = TurnInput {
             items: Vec::new(),
-            image_blobs: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: Some("same-trace".to_string()),
             protocol_extension: None,

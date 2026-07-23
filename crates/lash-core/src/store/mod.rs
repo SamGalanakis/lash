@@ -4,7 +4,9 @@ mod attachment_manifest;
 mod lease_timings;
 pub mod queued_work;
 
-pub use attachment_manifest::{AttachmentIntent, AttachmentManifest, AttachmentManifestEntry};
+pub use attachment_manifest::{
+    AttachmentIntent, AttachmentManifest, AttachmentManifestEntry, AttachmentOwnerKind,
+};
 pub use lease_timings::{LeaseTimings, LeaseTimingsError};
 
 const PROC_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
@@ -430,13 +432,12 @@ pub struct RuntimeCommit {
     pub enqueued_queue_batches: Vec<crate::QueuedWorkBatchDraft>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted_turn_input_turn_id: Option<String>,
-    /// Attachment ids whose bytes are referenced by this commit and
-    /// should be stamped `committed` in the write-ahead manifest as
-    /// part of the same SQL transaction. The backend marks each id
-    /// committed via [`AttachmentManifest::commit_refs`] before the
-    /// commit returns success. Hosts populate this from the
-    /// attachments emitted by tool calls and inline LLM-request
-    /// attachments produced during the turn.
+    /// Attachment ids explicitly adopted by this commit. In the same
+    /// transaction the backend also stamps every uncommitted manifest row owned
+    /// by `turn_commit.turn_id`, including ids that appear only in plain tool
+    /// JSON. This list preserves typed-output and cross-turn re-references;
+    /// adoption updates existing rows only and deliberately no-ops when this
+    /// session has no matching intent.
     pub committed_attachment_ids: Vec<crate::AttachmentId>,
 }
 

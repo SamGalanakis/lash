@@ -37,7 +37,6 @@ pub(crate) fn prune_terminal_processes_conn(
     filter: Option<ProcessListFilter>,
     max_change_seq: Option<u64>,
 ) -> Result<ProcessPruneReport, lash_core::PluginError> {
-    let max_change_seq = max_change_seq.map(|seq| seq as i64);
     let trigger_deliveries_exists = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trigger_deliveries'",
@@ -57,32 +56,7 @@ pub(crate) fn prune_terminal_processes_conn(
         .optional()
         .map_err(process_sqlite_error)?
         .is_some();
-    let mut stmt = conn
-        .prepare(
-            "SELECT process_id, record_json FROM processes
-             WHERE status != 'running'
-               AND updated_at_ms < ?1
-               AND (?2 IS NULL OR change_seq <= ?2)
-             ORDER BY process_id ASC",
-        )
-        .map_err(process_sqlite_error)?;
-    let rows = stmt
-        .query_map(params![cutoff, max_change_seq], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(process_sqlite_error)?;
-    let mut prunable = Vec::new();
-    for row in rows {
-        let (process_id, record_json) = row.map_err(process_sqlite_error)?;
-        let record: ProcessRecord =
-            serde_json::from_str(&record_json).map_err(process_decode_error)?;
-        if filter
-            .as_ref()
-            .is_none_or(|filter| filter.matches_record(&record))
-        {
-            prunable.push(process_id);
-        }
-    }
+    let prunable = prunable_terminal_process_ids_conn(conn, cutoff, filter, max_change_seq)?;
 
     let mut pruned_events = 0;
     let mut pruned_processes = 0;
@@ -134,4 +108,41 @@ pub(crate) fn prune_terminal_processes_conn(
         pruned_processes,
         pruned_events,
     })
+}
+
+pub(crate) fn prunable_terminal_process_ids_conn(
+    conn: &Connection,
+    cutoff: i64,
+    filter: Option<ProcessListFilter>,
+    max_change_seq: Option<u64>,
+) -> Result<Vec<String>, lash_core::PluginError> {
+    let max_change_seq = max_change_seq.map(|seq| seq as i64);
+    let mut stmt = conn
+        .prepare(
+            "SELECT process_id, record_json FROM processes
+             WHERE status != 'running'
+               AND updated_at_ms < ?1
+               AND (?2 IS NULL OR change_seq <= ?2)
+             ORDER BY process_id ASC",
+        )
+        .map_err(process_sqlite_error)?;
+    let rows = stmt
+        .query_map(params![cutoff, max_change_seq], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(process_sqlite_error)?;
+    let mut prunable = Vec::new();
+    for row in rows {
+        let (process_id, record_json) = row.map_err(process_sqlite_error)?;
+        let record: ProcessRecord =
+            serde_json::from_str(&record_json).map_err(process_decode_error)?;
+        if filter
+            .as_ref()
+            .is_none_or(|filter| filter.matches_record(&record))
+        {
+            prunable.push(process_id);
+        }
+    }
+
+    Ok(prunable)
 }

@@ -81,11 +81,11 @@ pub enum TurnFinish {
         <div class="section" id="input-boundary">
           <div class="section-header">
             <h2>Input Boundary</h2>
-            <p><code>TurnInput</code> is text plus image refs backed by the attachment store. Filesystem syntax is a host concern.</p>
+            <p><code>TurnInput</code> is text plus explicit attachment sources. Filesystem syntax is a host concern.</p>
           </div>
           <div class="two-col">
             <article class="panel"><h3>Text</h3><p><code>TurnInput::text(...)</code> or explicit <code>InputItem::Text</code>. For <code>@path</code>-style refs, resolve in the host and inline the marker text you want the model to see.</p></article>
-            <article class="panel"><h3>Images</h3><p><code>InputItem::ImageRef</code> with a matching entry in <code>TurnInput::image_blobs</code>. Stored as typed attachments and resolved when building provider requests.</p></article>
+            <article class="panel"><h3>Attachments</h3><p><code>InputItem::Attachment</code> carries inline bytes, a Lash-owned stored ref, an external URL, or a provider-scoped file id. Inline bytes normalize to stored refs before durable effects; borrowed sources pass through.</p></article>
           </div>
         </div>
 

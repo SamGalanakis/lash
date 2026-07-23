@@ -1,5 +1,93 @@
 use super::*;
 use crate::ToolProvider as _;
+use std::sync::atomic::AtomicUsize;
+
+struct AttachmentPutTool;
+
+fn attachment_put_tool_definition() -> crate::ToolDefinition {
+    crate::ToolDefinition::raw(
+        "tool:attachment_put",
+        "attachment_put",
+        "Write an attachment through the active runtime facade.",
+        crate::ToolDefinition::default_input_schema(),
+        serde_json::json!({ "type": "object", "additionalProperties": true }),
+    )
+}
+
+#[async_trait::async_trait]
+impl crate::ToolProvider for AttachmentPutTool {
+    fn tool_manifests(&self) -> Vec<crate::ToolManifest> {
+        vec![attachment_put_tool_definition().manifest()]
+    }
+
+    fn resolve_contract(&self, name: &str) -> Option<Arc<crate::ToolContract>> {
+        (name == "attachment_put").then(|| Arc::new(attachment_put_tool_definition().contract()))
+    }
+
+    async fn execute(&self, call: crate::ToolCall<'_>) -> crate::ToolResult {
+        let reference = call
+            .context
+            .attachments()
+            .put(
+                b"turn-owned-tool-attachment".to_vec(),
+                crate::AttachmentCreateMeta::new(
+                    crate::MediaType::parse("image/png").unwrap(),
+                    Some(crate::AttachmentTypeMetadata::image(Some(1), Some(1))),
+                    Some("turn-owned.png".to_string()),
+                ),
+            )
+            .await
+            .expect("tool attachment put");
+        crate::ToolResult::from_output(crate::ToolCallOutput::success(
+            crate::ToolValue::Attachment(crate::AttachmentSource::stored(reference)),
+        ))
+    }
+}
+
+fn attachment_put_transport() -> TestProvider {
+    let call_index = Arc::new(AtomicUsize::new(0));
+    TestProvider::builder()
+        .kind("mock")
+        .requires_streaming(true)
+        .complete(move |_| {
+            let call_index = Arc::clone(&call_index);
+            async move {
+                Ok(match call_index.fetch_add(1, Ordering::SeqCst) {
+                    0 => LlmResponse {
+                        parts: vec![LlmOutputPart::ToolCall {
+                            call_id: "attachment-put-call".to_string(),
+                            tool_name: "attachment_put".to_string(),
+                            input_json: "{}".to_string(),
+                            replay: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    1 => LlmResponse {
+                        full_text: "attachment stored".to_string(),
+                        parts: vec![LlmOutputPart::Text {
+                            text: "attachment stored".to_string(),
+                            response_meta: None,
+                        }],
+                        response_metadata: Default::default(),
+                        ..LlmResponse::default()
+                    },
+                    index => panic!("unexpected attachment provider call {index}"),
+                })
+            }
+        })
+        .build()
+}
+
+fn assert_turn_owned_attachment(store: &RecordingStore, turn_id: &str) {
+    let entries = store.attachment_manifest_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].owner_kind,
+        Some(crate::AttachmentOwnerKind::Turn)
+    );
+    assert_eq!(entries[0].owner_id.as_deref(), Some(turn_id));
+}
 
 fn lease_owner(owner_id: &str) -> crate::LeaseOwnerIdentity {
     crate::LeaseOwnerIdentity::opaque(owner_id, format!("{owner_id}:incarnation"))
@@ -659,7 +747,6 @@ async fn turn_provider_override_does_not_persist_into_session_policy_or_agent_fr
                 items: vec![InputItem::Text {
                     text: "use override".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -721,7 +808,6 @@ async fn plugin_before_turn_can_abort_and_inject_messages() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -773,7 +859,6 @@ async fn normal_turn_stores_effective_user_text_in_state() {
                 items: vec![InputItem::Text {
                     text: "/yolopush\n\n<skill>\nbody\n</skill>".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -841,7 +926,6 @@ async fn retryable_llm_failures_exhaust_and_fail_turn() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -891,7 +975,6 @@ async fn provider_failure_surfaces_typed_kind_and_retryability_on_turn_issue() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -945,7 +1028,6 @@ async fn assembled_turn_reports_turn_timing_from_injected_clock() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1007,7 +1089,6 @@ async fn queued_checkpoint_input_commits_before_continuing_standard_turn() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1084,7 +1165,10 @@ async fn queued_checkpoint_input_preserves_images() {
         "root",
         "image-attachment-turn",
         None,
-        TurnInput::text("see image").with_image_ref("test-image", vec![1, 2, 3]),
+        TurnInput::text("see image").with_attachment(crate::AttachmentSource::inline(
+            crate::MediaType::parse("image/png").unwrap(),
+            vec![1, 2, 3],
+        )),
     )
     .await;
 
@@ -1094,7 +1178,6 @@ async fn queued_checkpoint_input_preserves_images() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1113,7 +1196,7 @@ async fn queued_checkpoint_input_preserves_images() {
             && message
                 .blocks
                 .iter()
-                .any(|block| matches!(block, crate::llm::types::LlmContentBlock::Image { .. }))
+                .any(|block| matches!(block, crate::llm::types::LlmContentBlock::Attachment { .. }))
     }));
 }
 
@@ -1181,7 +1264,6 @@ async fn checkpoint_hook_can_inject_messages() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -1250,7 +1332,6 @@ async fn queued_checkpoint_input_accepts_and_persists_one_normal_user_message() 
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -2263,14 +2344,36 @@ async fn mid_chain_cancellation_commits_one_cancelled_terminal_and_settles_hando
 
 #[tokio::test]
 async fn claimed_normalization_failure_commits_and_settles_input() {
+    #[derive(Debug)]
+    struct DenyClaimedAttachments;
+
+    impl crate::AttachmentSourcePolicy for DenyClaimedAttachments {
+        fn authorize(
+            &self,
+            producer: &crate::AttachmentProducer,
+            _source: &crate::AttachmentSource,
+        ) -> Result<(), crate::AttachmentSourcePolicyError> {
+            Err(crate::AttachmentSourcePolicyError {
+                producer: producer.clone(),
+                reason: "claimed attachment denied for test".to_string(),
+            })
+        }
+    }
+
     let (mut runtime, store) =
         standard_runtime_with_transport_and_queue_store(mock_provider(Vec::new())).await;
+    runtime.host.core.attachment_source_policy = Arc::new(DenyClaimedAttachments);
     let inbound = crate::store::TurnInputStore::enqueue_pending_turn_input(
         store.as_ref(),
         crate::PendingTurnInputDraft::new(
             "root",
             crate::TurnInputIngress::NextTurn,
-            TurnInput::items([InputItem::image_ref("missing-image")]),
+            TurnInput::items([InputItem::attachment(
+                crate::AttachmentSource::external_url(
+                    crate::MediaType::parse("application/pdf").unwrap(),
+                    "https://example.test/denied.pdf",
+                ),
+            )]),
         ),
     )
     .await
@@ -2351,6 +2454,86 @@ async fn claimed_plugin_abort_commits_and_settles_input() {
             .iter()
             .all(|input| input.input_id != inbound.input_id)
     );
+}
+
+#[tokio::test]
+async fn stream_turn_tool_put_is_bound_to_the_turn_id() {
+    const TURN_ID: &str = "attachment-owner-stream-turn";
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(AttachmentPutTool),
+        attachment_put_transport(),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+
+    runtime
+        .stream_turn(
+            TurnInput::text("store an attachment"),
+            TurnOptions::new(CancellationToken::new(), named_turn_scope("root", TURN_ID)),
+        )
+        .await
+        .expect("stream turn succeeds");
+
+    assert_turn_owned_attachment(store.as_ref(), TURN_ID);
+}
+
+#[tokio::test]
+async fn stream_prepared_turn_tool_put_is_bound_to_the_turn_id() {
+    const TURN_ID: &str = "attachment-owner-prepared-turn";
+    let store = Arc::new(RecordingStore::default());
+    let runtime_store: Arc<dyn crate::RuntimePersistence> = store.clone();
+    let mut runtime = runtime_with_plugins_and_tools_and_host_and_store(
+        Vec::new(),
+        Arc::new(AttachmentPutTool),
+        attachment_put_transport(),
+        test_host_config(),
+        runtime_store,
+    )
+    .await;
+    let messages = crate::MessageSequence::from_owned(vec![Message {
+        id: "prepared-attachment-user".to_string(),
+        role: MessageRole::User,
+        parts: vec![Part {
+            id: "prepared-attachment-user.p0".to_string(),
+            kind: PartKind::Text,
+            content: "store an attachment".to_string(),
+            attachment: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_replay: None,
+            prune_state: PruneState::Intact,
+            reasoning_meta: None,
+            response_meta: None,
+        }]
+        .into(),
+        origin: None,
+    }]);
+
+    runtime
+        .stream_prepared_turn(
+            messages,
+            None,
+            None,
+            None,
+            crate::TurnContext::default(),
+            Vec::new(),
+            TURN_ID.to_string(),
+            1,
+            &NoopEventSink,
+            &NoopTurnActivitySink,
+            named_turn_scope("root", TURN_ID),
+            CancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .expect("prepared stream turn succeeds");
+
+    assert_turn_owned_attachment(store.as_ref(), TURN_ID);
 }
 
 #[tokio::test]
@@ -4176,7 +4359,6 @@ async fn session_manager_can_run_child_session_turn() {
             items: vec![InputItem::Text {
                 text: "hello".to_string(),
             }],
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -4293,7 +4475,6 @@ async fn child_relation_does_not_replace_active_session() {
                 items: vec![InputItem::Text {
                     text: "parent turn".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -4375,7 +4556,6 @@ async fn runtime_can_activate_managed_child_session() {
             items: vec![InputItem::Text {
                 text: "old manager should not own activated child".to_string(),
             }],
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -4515,7 +4695,6 @@ async fn turn_driver_normalizes_alias_effort_into_outgoing_request() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -4590,7 +4769,6 @@ async fn turn_driver_rejects_unsupported_effort_before_provider_call() {
                 items: vec![InputItem::Text {
                     text: "hello".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,

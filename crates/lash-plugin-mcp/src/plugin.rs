@@ -360,6 +360,7 @@ mod tests {
                 cwd: None,
                 startup_timeout_ms: 10_000,
                 call_timeout_ms: 10_000,
+                binary_content_attachments: false,
             },
         );
 

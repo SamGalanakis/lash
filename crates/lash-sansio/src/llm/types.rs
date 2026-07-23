@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use crate::{AttachmentRef, SchemaContract};
+use crate::{AttachmentRef, MediaType, SchemaContract};
 
 pub use crate::llm::capability::{
     CacheControlDialect, ModelCapability, ModelEffortValidationCategory,
@@ -217,10 +218,9 @@ pub enum LlmContentBlock {
         response_meta: Option<ResponseTextMeta>,
         cache_breakpoint: bool,
     },
-    /// Index into the enclosing `LlmRequest.attachments` vector. User-role
-    /// messages may embed images; adapters drop them for providers that
-    /// don't accept vision input.
-    Image { attachment_idx: usize },
+    /// Index into the enclosing `LlmRequest.attachments` vector. Provider
+    /// adapters dispatch on the attachment's MIME family and source.
+    Attachment { attachment_idx: usize },
     /// Assistant tool call with optional opaque provider replay state.
     ToolCall {
         call_id: String,
@@ -315,32 +315,86 @@ impl LlmRequestScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LlmAttachment {
-    pub mime: String,
-    pub data: Vec<u8>,
-    pub reference: Option<AttachmentRef>,
+/// Provider/account boundary for a provider-owned file id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderFileScope {
+    pub provider: String,
+    pub credential_scope: String,
 }
 
-impl LlmAttachment {
-    pub fn bytes(mime: impl Into<String>, data: Vec<u8>) -> Self {
+impl ProviderFileScope {
+    pub fn new(provider: impl Into<String>, credential_scope: impl Into<String>) -> Self {
         Self {
-            mime: mime.into(),
-            data,
-            reference: None,
+            provider: provider.into(),
+            credential_scope: credential_scope.into(),
+        }
+    }
+}
+
+/// The ownership-explicit attachment source at the LLM/content seam.
+///
+/// Inline bytes are transient and must be normalized to `Stored` before a
+/// durable effect is emitted. Borrowed sources are never fetched by Lash and
+/// never enter the attachment manifest.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttachmentSource {
+    Inline {
+        media_type: MediaType,
+        bytes: Vec<u8>,
+    },
+    Stored {
+        attachment_ref: AttachmentRef,
+    },
+    ExternalUrl {
+        media_type: MediaType,
+        url: String,
+    },
+    ProviderFile {
+        provider_scope: ProviderFileScope,
+        id: String,
+    },
+}
+
+impl AttachmentSource {
+    pub fn inline(media_type: MediaType, bytes: Vec<u8>) -> Self {
+        Self::Inline { media_type, bytes }
+    }
+
+    pub fn stored(attachment_ref: AttachmentRef) -> Self {
+        Self::Stored { attachment_ref }
+    }
+
+    pub fn external_url(media_type: MediaType, url: impl Into<String>) -> Self {
+        Self::ExternalUrl {
+            media_type,
+            url: url.into(),
         }
     }
 
-    pub fn reference(reference: AttachmentRef) -> Self {
-        Self {
-            mime: reference.canonical_mime().to_string(),
-            data: Vec::new(),
-            reference: Some(reference),
+    pub fn provider_file(provider_scope: ProviderFileScope, id: impl Into<String>) -> Self {
+        Self::ProviderFile {
+            provider_scope,
+            id: id.into(),
         }
     }
 
-    pub fn is_resolved(&self) -> bool {
-        !self.data.is_empty() || self.reference.is_none()
+    pub fn media_type(&self) -> Option<&MediaType> {
+        match self {
+            Self::Inline { media_type, .. } | Self::ExternalUrl { media_type, .. } => {
+                Some(media_type)
+            }
+            Self::Stored { attachment_ref } => Some(&attachment_ref.media_type),
+            Self::ProviderFile { .. } => None,
+        }
+    }
+
+    pub fn stored_ref(&self) -> Option<&AttachmentRef> {
+        match self {
+            Self::Stored { attachment_ref } => Some(attachment_ref),
+            Self::Inline { .. } | Self::ExternalUrl { .. } | Self::ProviderFile { .. } => None,
+        }
     }
 }
 
@@ -376,7 +430,13 @@ impl GenerationOptions {
 pub struct LlmRequest {
     pub model: String,
     pub messages: Vec<LlmMessage>,
-    pub attachments: Vec<LlmAttachment>,
+    pub attachments: Vec<AttachmentSource>,
+    /// Request-local bytes resolved through the session guard for `Stored`
+    /// sources. This materialization cache is never serialized and does not
+    /// blur source ownership: adapters still inspect the original source and
+    /// may only upload-cache entries whose source is `Stored`.
+    #[serde(default, skip)]
+    pub resolved_stored: HashMap<crate::AttachmentId, Vec<u8>>,
     pub tools: Arc<Vec<LlmToolSpec>>,
     pub tool_choice: LlmToolChoice,
     pub model_variant: crate::llm::capability::ReasoningSelection,
@@ -393,6 +453,17 @@ pub struct LlmRequest {
 }
 
 impl LlmRequest {
+    pub fn attachment_bytes<'a>(&'a self, source: &'a AttachmentSource) -> Option<&'a [u8]> {
+        match source {
+            AttachmentSource::Inline { bytes, .. } => Some(bytes),
+            AttachmentSource::Stored { attachment_ref } => self
+                .resolved_stored
+                .get(&attachment_ref.id)
+                .map(Vec::as_slice),
+            AttachmentSource::ExternalUrl { .. } | AttachmentSource::ProviderFile { .. } => None,
+        }
+    }
+
     pub fn session_id(&self) -> &str {
         self.scope.session_id.as_str()
     }

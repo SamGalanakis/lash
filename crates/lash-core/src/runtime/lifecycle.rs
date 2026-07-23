@@ -1,5 +1,29 @@
 use super::*;
 
+pub(in crate::runtime) struct RuntimePersistenceBindings {
+    runtime_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    attachment_manifest_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+}
+
+impl RuntimePersistenceBindings {
+    pub(in crate::runtime) fn new(
+        runtime_store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+    ) -> Self {
+        Self {
+            attachment_manifest_store: runtime_store.clone(),
+            runtime_store,
+        }
+    }
+
+    pub(in crate::runtime) fn with_attachment_manifest_store(
+        mut self,
+        store: Arc<dyn crate::store::RuntimePersistence>,
+    ) -> Self {
+        self.attachment_manifest_store = Some(store);
+        self
+    }
+}
+
 impl LashRuntime {
     /// Override the owner identity used for durable session execution leases.
     ///
@@ -66,28 +90,19 @@ impl LashRuntime {
         // uncommitted manifest rows that GC can reconcile. Ephemeral
         // (no-store) runtimes use the inner store directly — there's
         // nothing to reconcile against.
-        if let Some(store) = services.store.clone() {
+        if let Some(store) = services.attachment_manifest_store.clone() {
             let manifest: Arc<dyn crate::AttachmentManifest> =
                 Arc::new(crate::attachments::PersistenceManifestAdapter(store));
-            // `host` can come from a live runtime during same-session rebuilds
-            // and managed-child materialization. Rebind a fresh facade over the
-            // flat backend so a same-session rebuild inherits its pending
-            // commit ids while a managed child starts with its own empty
-            // manifest refs (bytes may still dedup in the shared backend — that
-            // is intended).
+            // Rebind a fresh facade over the flat backend. Attachment ownership
+            // is recorded durably on each intent; no live facade state crosses
+            // rebuilds or managed-child materialization.
             let previous_attachment_store = Arc::clone(&host.core.durability.attachment_store);
-            let inherited_pending_attachment_ids =
-                if previous_attachment_store.session_id() == state.session_id {
-                    previous_attachment_store.pending_manifest_commit_ids()
-                } else {
-                    Vec::new()
-                };
             let backend = Arc::clone(previous_attachment_store.backend());
-            let scoped = Arc::new(crate::SessionAttachmentStore::new_with_pending(
+            let scoped = Arc::new(crate::SessionAttachmentStore::new_with_clock(
                 backend,
                 manifest,
                 state.session_id.clone(),
-                inherited_pending_attachment_ids,
+                Arc::clone(&host.core.clock),
             ));
             host.core.durability.attachment_store = scoped;
         }
@@ -218,15 +233,19 @@ impl LashRuntime {
     /// residency cannot drift between them. That drift previously shipped: the
     /// worker rebuild silently kept the full graph and skipped the persisted
     /// tool-catalog restore that the live path applied.
-    pub(crate) async fn assemble_runtime(
+    pub(in crate::runtime) async fn assemble_runtime(
         policy: SessionPolicy,
         embedded_host: EmbeddedRuntimeHost,
         plugin_session: Arc<crate::PluginSession>,
-        store: Option<Arc<dyn crate::store::RuntimePersistence>>,
+        persistence: RuntimePersistenceBindings,
         process_registry: Option<Arc<dyn ProcessRegistry>>,
         mut state: RuntimeSessionState,
         residency: Residency,
     ) -> Result<Self, SessionError> {
+        let RuntimePersistenceBindings {
+            runtime_store: store,
+            attachment_manifest_store,
+        } = persistence;
         // ActivePathOnly without a store is a data-loss footgun: trimming drops
         // orphans from RAM with nowhere to reload them from.
         if matches!(residency, Residency::ActivePathOnly) && store.is_none() {
@@ -243,11 +262,17 @@ impl LashRuntime {
         let mut runtime = match (store, process_registry) {
             (Some(store), Some(registry)) => {
                 let host = ProcessRuntimeHost::new(embedded_host, registry);
-                let services = PersistentRuntimeServices::new(plugin_session, store);
+                let mut services = PersistentRuntimeServices::new(plugin_session, store);
+                if let Some(manifest_store) = attachment_manifest_store {
+                    services = services.with_attachment_manifest_store(manifest_store);
+                }
                 Self::from_persistent_background_state(policy, host, services, state).await?
             }
             (Some(store), None) => {
-                let services = PersistentRuntimeServices::new(plugin_session, store);
+                let mut services = PersistentRuntimeServices::new(plugin_session, store);
+                if let Some(manifest_store) = attachment_manifest_store {
+                    services = services.with_attachment_manifest_store(manifest_store);
+                }
                 Self::from_persistent_embedded_state(policy, embedded_host, services, state).await?
             }
             (None, Some(registry)) => {
@@ -304,7 +329,7 @@ impl LashRuntime {
             policy,
             embedded,
             plugin_session,
-            store,
+            RuntimePersistenceBindings::new(store),
             env.process_registry.as_ref().cloned(),
             state,
             env.residency,

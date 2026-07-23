@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+mod attachment_tests;
 
 type ScriptedHttpResponse = (u16, Vec<(String, String)>, &'static str);
 
@@ -180,6 +181,7 @@ fn request(messages: Vec<LlmMessage>) -> LlmRequest {
         model: "openai/gpt-5.4".to_string(),
         messages,
         attachments: Vec::new(),
+        resolved_stored: Default::default(),
         tools: Arc::new(Vec::<LlmToolSpec>::new()),
         tool_choice: LlmToolChoice::Auto,
         model_variant: Default::default(),
@@ -386,13 +388,14 @@ fn chat_image_attachment_serializes_as_data_url() {
                 response_meta: None,
                 cache_breakpoint: false,
             },
-            LlmContentBlock::Image { attachment_idx: 0 },
+            LlmContentBlock::Attachment { attachment_idx: 0 },
         ],
     )]);
-    req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
-
+    req.attachments = vec![AttachmentSource::inline(
+        lash_core::MediaType::parse("image/png").unwrap(),
+        png_bytes.clone(),
+    )];
     let body = provider.build_chat_request_body(&req, false).unwrap();
-
     let messages = body["messages"].as_array().expect("messages");
     let user_msg = messages.last().expect("user message");
     let content = user_msg["content"].as_array().expect("content array");
@@ -412,17 +415,24 @@ fn chat_unsupported_image_mime_is_rejected_at_request_boundary() {
     let provider = openrouter_provider();
     let mut req = request(vec![LlmMessage::new(
         LlmRole::User,
-        vec![LlmContentBlock::Image { attachment_idx: 0 }],
+        vec![LlmContentBlock::Attachment { attachment_idx: 0 }],
     )]);
-    req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+    req.attachments = vec![AttachmentSource::inline(
+        lash_core::MediaType::parse("image/bmp").unwrap(),
+        vec![0x42, 0x4D],
+    )];
 
     let err = provider
         .build_chat_request_body(&req, false)
         .expect_err("bmp should be rejected before wire");
-
-    assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
-    assert!(err.message.contains("OpenAI"));
-    assert!(err.message.contains("image/bmp"));
+    assert_eq!(
+        err.code.as_deref(),
+        Some("unsupported_attachment_capability")
+    );
+    assert_eq!(
+        err.message,
+        "OpenAI Chat Completions cannot materialize attachment MIME `image/bmp` from source `inline`; providers accepting this MIME/source: none"
+    );
 }
 
 #[test]
@@ -437,13 +447,14 @@ fn responses_image_attachment_serializes_as_input_image_data_url() {
                 response_meta: None,
                 cache_breakpoint: false,
             },
-            LlmContentBlock::Image { attachment_idx: 0 },
+            LlmContentBlock::Attachment { attachment_idx: 0 },
         ],
     )]);
-    req.attachments = vec![LlmAttachment::bytes("image/png", png_bytes.clone())];
-
+    req.attachments = vec![AttachmentSource::inline(
+        lash_core::MediaType::parse("image/png").unwrap(),
+        png_bytes.clone(),
+    )];
     let body = provider.build_responses_request_body(&req, false).unwrap();
-
     let input = body["input"].as_array().expect("input array");
     let user_msg = input.last().expect("user message");
     let content = user_msg["content"].as_array().expect("content array");
@@ -463,15 +474,21 @@ fn responses_unsupported_image_mime_is_rejected_at_request_boundary() {
     let provider = OpenAiProvider::new("key");
     let mut req = request(vec![LlmMessage::new(
         LlmRole::User,
-        vec![LlmContentBlock::Image { attachment_idx: 0 }],
+        vec![LlmContentBlock::Attachment { attachment_idx: 0 }],
     )]);
-    req.attachments = vec![LlmAttachment::bytes("image/bmp", vec![0x42, 0x4D])];
+    req.attachments = vec![AttachmentSource::inline(
+        lash_core::MediaType::parse("image/bmp").unwrap(),
+        vec![0x42, 0x4D],
+    )];
 
     let err = provider
         .build_responses_request_body(&req, false)
         .expect_err("bmp should be rejected before wire");
 
-    assert_eq!(err.code.as_deref(), Some("unsupported_image_format"));
+    assert_eq!(
+        err.code.as_deref(),
+        Some("unsupported_attachment_capability")
+    );
     assert!(err.message.contains("OpenAI"));
 }
 

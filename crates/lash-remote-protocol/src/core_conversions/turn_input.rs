@@ -118,23 +118,16 @@ impl TryFrom<RemoteTurnInput> for lash_core::TurnInput {
         let RemoteTurnInput {
             protocol_version: _,
             items,
-            image_blobs_base64,
             protocol_turn_options,
             trace_turn_id,
             prompt_layer,
         } = value;
-        let mut image_blobs = HashMap::new();
-        for (id, encoded) in image_blobs_base64 {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|err| RemoteProtocolError::InvalidImageBlob {
-                    id: id.clone(),
-                    message: err.to_string(),
-                })?;
-            image_blobs.insert(id, bytes);
-        }
-        let mut input = lash_core::TurnInput::items(items.into_iter().map(Into::into));
-        input.image_blobs = image_blobs;
+        let mut input = lash_core::TurnInput::items(
+            items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         input.protocol_turn_options = protocol_turn_options.map(Into::into);
         input.trace_turn_id = trace_turn_id;
         if let Some(prompt_layer) = prompt_layer {
@@ -172,7 +165,6 @@ impl TryFrom<lash_core::TurnInput> for RemoteTurnInput {
         // accessors below; new TurnContext fields are not guarded here.
         let lash_core::TurnInput {
             items,
-            image_blobs,
             protocol_turn_options,
             trace_turn_id,
             protocol_extension,
@@ -198,11 +190,10 @@ impl TryFrom<lash_core::TurnInput> for RemoteTurnInput {
             .then(|| RemotePromptLayer::from(turn_context.prompt_layer().clone()));
         Ok(Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
-            items: items.into_iter().map(Into::into).collect(),
-            image_blobs_base64: image_blobs
+            items: items
                 .into_iter()
-                .map(|(id, bytes)| (id, base64::engine::general_purpose::STANDARD.encode(bytes)))
-                .collect(),
+                .map(TryInto::try_into)
+                .collect::<Result<Vec<_>, _>>()?,
             protocol_turn_options: protocol_turn_options.map(Into::into),
             trace_turn_id,
             prompt_layer,
@@ -210,20 +201,28 @@ impl TryFrom<lash_core::TurnInput> for RemoteTurnInput {
     }
 }
 
-impl From<RemoteInputItem> for lash_core::InputItem {
-    fn from(value: RemoteInputItem) -> Self {
+impl TryFrom<RemoteInputItem> for lash_core::InputItem {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: RemoteInputItem) -> Result<Self, Self::Error> {
         match value {
-            RemoteInputItem::Text { text } => Self::Text { text },
-            RemoteInputItem::ImageRef { id } => Self::ImageRef { id },
+            RemoteInputItem::Text { text } => Ok(Self::Text { text }),
+            RemoteInputItem::Attachment { source } => Ok(Self::Attachment {
+                source: source.try_into()?,
+            }),
         }
     }
 }
 
-impl From<lash_core::InputItem> for RemoteInputItem {
-    fn from(value: lash_core::InputItem) -> Self {
+impl TryFrom<lash_core::InputItem> for RemoteInputItem {
+    type Error = RemoteProtocolError;
+
+    fn try_from(value: lash_core::InputItem) -> Result<Self, Self::Error> {
         match value {
-            lash_core::InputItem::Text { text } => Self::Text { text },
-            lash_core::InputItem::ImageRef { id } => Self::ImageRef { id },
+            lash_core::InputItem::Text { text } => Ok(Self::Text { text }),
+            lash_core::InputItem::Attachment { source } => Ok(Self::Attachment {
+                source: source.into(),
+            }),
         }
     }
 }

@@ -725,6 +725,12 @@ impl LashCoreBuilder {
     /// return a store for that specific session. Do not use this to wrap one
     /// pre-opened root store; pass root-only stores with
     /// `LashCore::session(...).store(store)` instead.
+    ///
+    /// Durable attachment GC never guesses process-registry co-location. Hosts
+    /// using owner-aware GC must explicitly call
+    /// `SqliteSessionStoreFactory::new_with_process_registry(...)` or
+    /// `PostgresStorage::session_store_factory_with_shared_process_registry()`
+    /// on the concrete factory before erasing it behind this trait object.
     pub fn store_factory(mut self, store_factory: Arc<dyn SessionStoreFactory>) -> Self {
         self.store_factory = Some(store_factory);
         self
@@ -737,6 +743,8 @@ impl LashCoreBuilder {
     /// child session id. Hosts that pass an explicit root store with
     /// `SessionBuilder::store` should set this when child sessions need
     /// persistence.
+    /// The same explicit process-registry wiring required by `store_factory`
+    /// applies when this factory participates in attachment GC.
     pub fn child_store_factory(mut self, store_factory: Arc<dyn SessionStoreFactory>) -> Self {
         self.child_store_factory = Some(store_factory);
         self

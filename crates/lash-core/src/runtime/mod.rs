@@ -152,11 +152,11 @@ pub use process::{
     apply_process_status_projection, current_epoch_ms, epoch_ms_from_system_time,
     load_process_execution_env, materialize_process_event_semantics, persist_process_execution_env,
     prepare_process_event_append, prepare_process_registration, process_event_payload_hash,
-    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
-    process_wake_delivery, process_wake_input_from_event_payload, process_wake_turn_cause,
-    process_wake_turn_text, require_event_replay, system_time_from_epoch_ms,
-    terminal_append_request, terminal_event_type_name, validate_process_signal_name,
-    watch_process_registry, watch_process_registry_with_sink,
+    process_runtime_session_ids, process_signal_event_type, process_signal_name_from_event_type,
+    process_signal_wait_key, process_wake_delivery, process_wake_input_from_event_payload,
+    process_wake_turn_cause, process_wake_turn_text, require_event_replay,
+    system_time_from_epoch_ms, terminal_append_request, terminal_event_type_name,
+    validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
 };
 pub use process_work_driver::{InlineProcessRunHandle, ProcessRunHandle, ProcessWorkDriver};
 pub use process_worker::{
@@ -285,7 +285,7 @@ impl Drop for RuntimeNamedPhase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text { text: String },
-    ImageRef { id: String },
+    Attachment { source: crate::AttachmentSource },
 }
 
 impl InputItem {
@@ -293,8 +293,8 @@ impl InputItem {
         Self::Text { text: text.into() }
     }
 
-    pub fn image_ref(id: impl Into<String>) -> Self {
-        Self::ImageRef { id: id.into() }
+    pub fn attachment(source: crate::AttachmentSource) -> Self {
+        Self::Attachment { source }
     }
 }
 
@@ -302,8 +302,6 @@ impl InputItem {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TurnInput {
     pub items: Vec<InputItem>,
-    #[serde(default)]
-    pub image_blobs: HashMap<String, Vec<u8>>,
     /// Per-turn override for protocol-owned turn options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_turn_options: Option<crate::ProtocolTurnOptions>,
@@ -329,7 +327,6 @@ impl TurnInput {
     pub fn items(items: impl IntoIterator<Item = InputItem>) -> Self {
         Self {
             items: items.into_iter().collect(),
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -337,28 +334,8 @@ impl TurnInput {
         }
     }
 
-    pub fn with_image_blob(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
-        self.image_blobs.insert(id.into(), bytes);
-        self
-    }
-
-    pub fn with_image_blobs<I, K>(mut self, image_blobs: I) -> Self
-    where
-        I: IntoIterator<Item = (K, Vec<u8>)>,
-        K: Into<String>,
-    {
-        self.image_blobs.extend(
-            image_blobs
-                .into_iter()
-                .map(|(id, bytes)| (id.into(), bytes)),
-        );
-        self
-    }
-
-    pub fn with_image_ref(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
-        let id = id.into();
-        self.items.push(InputItem::image_ref(id.clone()));
-        self.image_blobs.insert(id, bytes);
+    pub fn with_attachment(mut self, source: crate::AttachmentSource) -> Self {
+        self.items.push(InputItem::attachment(source));
         self
     }
 
@@ -583,7 +560,7 @@ pub trait ProtocolSessionExtension: Send + Sync {
 #[derive(Clone, Debug)]
 pub(super) enum NormalizedItem {
     Text(String),
-    Image(crate::AttachmentRef),
+    Attachment(crate::AttachmentSource),
 }
 
 /// Canonical assistant output payload.
@@ -1046,16 +1023,13 @@ pub trait SessionStoreFactory: Send + Sync {
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String>;
 
-    /// The attachment GC root set across ALL sessions this factory owns,
-    /// reconciled against `intent_grace_cutoff_epoch_ms`: every committed ref,
-    /// plus every uncommitted intent younger than the cutoff. Intents at or
-    /// before the cutoff are crash orphans (their turn never committed and has
-    /// aged past the grace window) — the factory forgets them and excludes them,
-    /// so their blobs become collectable. Factories with no attachment story
-    /// default to empty; the durable factories override this (Postgres queries
-    /// and prunes the global manifest table; SQLite unions and reconciles its
-    /// per-session databases at sweep time). Exposed to the GC lever via the
-    /// blanket [`AttachmentRootSet`](crate::AttachmentRootSet) implementation.
+    /// The attachment GC root set across every session this factory owns. An
+    /// uncommitted intent is forgotten only when it is old enough and its
+    /// durable owner is dead: a superseding session turn commit or an absent
+    /// process row. Ownerless host puts use age alone. Factories with no
+    /// attachment story default to empty; durable factories evaluate and prune
+    /// the predicate atomically. Exposed to the GC lever via the blanket
+    /// [`AttachmentRootSet`](crate::AttachmentRootSet) implementation.
     async fn live_attachment_refs(
         &self,
         intent_grace_cutoff_epoch_ms: u64,
@@ -1065,8 +1039,8 @@ pub trait SessionStoreFactory: Send + Sync {
     }
 
     /// Whether ANY session this factory owns currently holds a GC-live ref for
-    /// `attachment_id` (a committed ref, or an uncommitted intent younger than
-    /// the cutoff). The single-id counterpart to
+    /// `attachment_id` under that same age plus owner-reachability rule. The
+    /// single-id counterpart to
     /// [`Self::live_attachment_refs`], used by the attachment GC lever's
     /// delete-time root re-check so it need not re-materialize the whole root set
     /// per candidate blob. The default re-materializes the root set and tests

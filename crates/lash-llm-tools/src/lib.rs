@@ -490,7 +490,7 @@ mod tests {
             .flat_map(|message| message.parts.iter())
             .filter_map(|part| match part {
                 lash_core::DirectPart::Text(text) => Some(text.as_str()),
-                lash_core::DirectPart::Image(_) => None,
+                lash_core::DirectPart::Attachment(_) => None,
             })
             .collect::<Vec<_>>()
             .join("\n");

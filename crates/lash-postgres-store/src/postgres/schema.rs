@@ -123,11 +123,16 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
             canonical_uri TEXT NOT NULL,
             intent_at_ms BIGINT NOT NULL,
             committed_at_ms BIGINT,
+            owner_kind TEXT CHECK (owner_kind IN ('turn', 'process')),
+            owner_id TEXT,
+            CHECK ((owner_kind IS NULL) = (owner_id IS NULL)),
             PRIMARY KEY (session_id, attachment_id)
         );
         CREATE INDEX IF NOT EXISTS idx_lash_attachment_manifest_uncommitted
             ON lash_attachment_manifest(committed_at_ms)
             WHERE committed_at_ms IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_lash_attachment_manifest_owner
+            ON lash_attachment_manifest(session_id, owner_kind, owner_id, committed_at_ms);
 
         DROP SEQUENCE IF EXISTS lash_process_change_seq;
 

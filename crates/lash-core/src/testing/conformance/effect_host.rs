@@ -1492,7 +1492,7 @@ fn replay_conformance_tool_attempt_outcome(
 ) -> RuntimeEffectOutcome {
     RuntimeEffectOutcome::ToolAttempt {
         launch: Box::new(crate::ToolAttemptLaunch::Done {
-            record: crate::ToolCallRecord {
+            record: Box::new(crate::ToolCallRecord {
                 call_id: Some(call_id.to_string()),
                 tool: tool_name.to_string(),
                 args: serde_json::json!({ "call": call_id }),
@@ -1501,7 +1501,7 @@ fn replay_conformance_tool_attempt_outcome(
                     "tool": tool_name,
                 })),
                 duration_ms: 0,
-            },
+            }),
         }),
         triggers: Vec::new(),
     }

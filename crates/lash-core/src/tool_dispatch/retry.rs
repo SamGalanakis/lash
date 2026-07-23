@@ -51,10 +51,12 @@ async fn execute_once<'run>(
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
     let args = &prepared.args;
-    context
+    let mut result = context
         .tools
         .execute_by_id(&prepared.tool_id, args, &tool_context, progress)
-        .await
+        .await;
+    normalize_tool_result_attachments(context, &prepared.tool_name, &mut result).await;
+    result
 }
 
 async fn execute_granted_once<'run>(
@@ -64,10 +66,71 @@ async fn execute_granted_once<'run>(
     progress: Option<&ProgressSender>,
     tool_context: ToolContext<'run>,
 ) -> ToolResult {
-    context
+    let mut result = context
         .tools
         .execute_granted(grant, &prepared.args, &tool_context, progress)
-        .await
+        .await;
+    normalize_tool_result_attachments(context, &grant.manifest.name, &mut result).await;
+    result
+}
+
+async fn normalize_tool_result_attachments(
+    context: &ToolDispatchContext<'_>,
+    tool_name: &str,
+    result: &mut ToolResult,
+) {
+    let Some(output) = result.as_done_output() else {
+        return;
+    };
+    let sources = output.attachments();
+    for source in sources {
+        let producer = crate::AttachmentProducer::Tool {
+            tool_name: tool_name.to_string(),
+        };
+        if let Err(error) = context
+            .attachment_source_policy
+            .authorize(&producer, &source)
+        {
+            *result = attachment_failure("attachment_source_policy_denied", error);
+            return;
+        }
+        let crate::AttachmentSource::Inline { media_type, bytes } = &source else {
+            continue;
+        };
+        let attachment_ref = match context
+            .attachment_store
+            .put(
+                bytes.clone(),
+                crate::AttachmentCreateMeta::new(media_type.clone(), None, None),
+            )
+            .await
+        {
+            Ok(attachment_ref) => attachment_ref,
+            Err(error) => {
+                *result = attachment_failure("attachment_store_failed", error);
+                return;
+            }
+        };
+        if let Some(output) = result.as_done_output().cloned() {
+            let mut output = output;
+            output.replace_attachment_source(
+                &source,
+                &crate::AttachmentSource::stored(attachment_ref),
+            );
+            *result = ToolResult::from_output(output);
+        }
+    }
+}
+
+fn attachment_failure(code: &str, error: impl std::fmt::Display) -> ToolResult {
+    ToolResult::failure(crate::ToolFailure {
+        class: crate::ToolFailureClass::Execution,
+        code: code.to_string(),
+        message: error.to_string(),
+        source: crate::ToolFailureSource::Runtime,
+        retry: crate::ToolRetryDisposition::Never,
+        raw: None,
+    })
 }
 
 pub(crate) fn retry_after_ms(

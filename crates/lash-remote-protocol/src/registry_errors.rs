@@ -79,8 +79,8 @@ pub enum RemoteProtocolError {
         type_name: &'static str,
         message: String,
     },
-    #[error("invalid image blob `{id}`: {message}")]
-    InvalidImageBlob { id: String, message: String },
+    #[error("invalid attachment data `{id}`: {message}")]
+    InvalidAttachmentData { id: String, message: String },
     #[error("invalid attachment reference `{id}`: {message}")]
     InvalidAttachmentRef { id: String, message: String },
     #[error("turn input is not remote-safe: {0}")]

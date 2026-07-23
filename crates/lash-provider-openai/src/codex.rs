@@ -478,6 +478,7 @@ impl CodexProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
+        shared::validate_responses_attachments(req, "OpenAI Codex")?;
         let tools = Self::build_tools(req)?;
         let (instructions, input) =
             shared::build_responses_input(req, shared::ResponsesInputOptions::CODEX);
@@ -2025,6 +2026,7 @@ mod tests {
             model: "gpt-5.4".to_string(),
             messages,
             attachments: Vec::new(),
+            resolved_stored: Default::default(),
             tools: Arc::new(Vec::<LlmToolSpec>::new()),
             tool_choice: LlmToolChoice::Auto,
             model_variant: Default::default(),

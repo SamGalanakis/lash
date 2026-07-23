@@ -38,6 +38,10 @@ struct ReadFileArgs {
     #[serde(default = "default_limit")]
     #[schemars(range(min = 1))]
     limit: usize,
+    /// Attach the file natively using this MIME type instead of extracting or
+    /// rejecting it. Provider support is checked when the request is built.
+    #[serde(default)]
+    attach_as: Option<String>,
 }
 
 fn default_offset() -> usize {
@@ -48,17 +52,16 @@ fn default_limit() -> usize {
     DEFAULT_LIMIT
 }
 
-struct ImageAttachmentData {
+struct FileAttachmentData {
     data: Vec<u8>,
     media_type: lash_core::MediaType,
-    width: Option<u32>,
-    height: Option<u32>,
+    type_metadata: Option<lash_core::AttachmentTypeMetadata>,
     label: String,
 }
 
 enum ReadFileBlockingResult {
     Tool(ToolResult),
-    Image(ImageAttachmentData),
+    Attachment(FileAttachmentData),
 }
 
 impl ReadFileBlockingResult {
@@ -69,7 +72,7 @@ impl ReadFileBlockingResult {
     async fn into_tool_result(self, context: &lash_core::ToolContext<'_>) -> ToolResult {
         match self {
             Self::Tool(result) => result,
-            Self::Image(image) => store_image_attachment(context, image).await,
+            Self::Attachment(attachment) => store_attachment(context, attachment).await,
         }
     }
 }
@@ -87,8 +90,18 @@ impl StaticToolExecute for ReadFile {
             let path_str = args.path;
             let offset = args.offset.max(1);
             let limit = args.limit;
+            let attach_as = match args.attach_as {
+                Some(value) => match lash_core::MediaType::parse(&value) {
+                    Ok(media_type) => Some(media_type),
+                    Err(err) => return invalid_tool_args(err.to_string()),
+                },
+                None => None,
+            };
 
-            match run_blocking_value(move || execute_read_file_sync(&path_str, offset, limit)).await
+            match run_blocking_value(move || {
+                execute_read_file_sync(&path_str, offset, limit, attach_as)
+            })
+            .await
             {
                 Ok(result) => result.into_tool_result(call.context).await,
                 Err(err) => ToolResult::err_fmt(format_args!("{err}")),
@@ -102,7 +115,7 @@ fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::typed::<ReadFileArgs, String>(
                 "tool:read_file",
                 "read_file",
-                "Read a known file or directory. Text returns lines prefixed as `LINE: text`, directories return concise paginated entry listings, PDFs return extracted text, and images return visual content. Default: 2000 lines. Use `files.glob` for discovery.",
+                "Read a known file or directory. Text returns lines prefixed as `LINE: text`, directories return concise paginated entry listings, PDFs return extracted text, and five common image formats return visual content. Set `attach_as` to an explicit MIME type to attach another provider-capable file natively. Default: 2000 lines. Use `files.glob` for discovery.",
             )
             .with_examples(vec![
                 r#"await files.read({ path: "Cargo.toml" })?"#.into(),
@@ -116,7 +129,12 @@ fn read_file_tool_definition() -> ToolDefinition {
             .with_retry_policy(ToolRetryPolicy::safe(2, 25, 100))
 }
 
-fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFileBlockingResult {
+fn execute_read_file_sync(
+    path_str: &str,
+    offset: usize,
+    limit: usize,
+    attach_as: Option<lash_core::MediaType>,
+) -> ReadFileBlockingResult {
     let path = Path::new(path_str);
     if !path.exists() {
         return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
@@ -136,6 +154,10 @@ fn execute_read_file_sync(path_str: &str, offset: usize, limit: usize) -> ReadFi
             }
         };
         return ReadFileBlockingResult::tool(ToolResult::from_output(output));
+    }
+
+    if let Some(media_type) = attach_as {
+        return read_native_attachment(path, path_str, media_type);
     }
 
     // Image files — return as visual attachment
@@ -263,44 +285,73 @@ fn read_image(path: &Path, path_str: &str, mime: &str) -> ReadFileBlockingResult
         None => format!("{} ({}KB)", path_str, size_kb),
     };
 
-    let Some(media_type) = lash_core::MediaType::from_mime(mime) else {
-        return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
-            "Unsupported image MIME type: {mime}"
-        )));
-    };
-    ReadFileBlockingResult::Image(ImageAttachmentData {
+    let media_type = lash_core::MediaType::parse(mime)
+        .expect("built-in image MIME types must be syntactically valid");
+    ReadFileBlockingResult::Attachment(FileAttachmentData {
         data,
         media_type,
-        width: dims.map(|(width, _)| width),
-        height: dims.map(|(_, height)| height),
+        type_metadata: Some(lash_core::AttachmentTypeMetadata::image(
+            dims.map(|(width, _)| width),
+            dims.map(|(_, height)| height),
+        )),
         label,
     })
 }
 
-async fn store_image_attachment(
+fn read_native_attachment(
+    path: &Path,
+    path_str: &str,
+    media_type: lash_core::MediaType,
+) -> ReadFileBlockingResult {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(err) => {
+            return ReadFileBlockingResult::tool(ToolResult::err_fmt(format_args!(
+                "Failed to read native attachment: {err}"
+            )));
+        }
+    };
+    let type_metadata = if media_type.is_image() {
+        let dimensions = image_dimensions(&data, media_type.as_str());
+        Some(lash_core::AttachmentTypeMetadata::image(
+            dimensions.map(|(width, _)| width),
+            dimensions.map(|(_, height)| height),
+        ))
+    } else {
+        None
+    };
+    let label = format!("{} ({}KB)", path_str, data.len() / 1024);
+    ReadFileBlockingResult::Attachment(FileAttachmentData {
+        data,
+        media_type,
+        type_metadata,
+        label,
+    })
+}
+
+async fn store_attachment(
     context: &lash_core::ToolContext<'_>,
-    image: ImageAttachmentData,
+    attachment: FileAttachmentData,
 ) -> ToolResult {
     let reference = match context
         .attachments()
         .put(
-            image.data,
+            attachment.data,
             lash_core::AttachmentCreateMeta::new(
-                image.media_type,
-                image.width,
-                image.height,
-                Some(image.label),
+                attachment.media_type,
+                attachment.type_metadata,
+                Some(attachment.label),
             ),
         )
         .await
     {
         Ok(reference) => reference,
         Err(err) => {
-            return ToolResult::err_fmt(format_args!("Failed to store image attachment: {err}"));
+            return ToolResult::err_fmt(format_args!("Failed to store attachment: {err}"));
         }
     };
     ToolResult::from_output(lash_core::ToolCallOutput::success(
-        lash_core::ToolValue::Attachment(reference),
+        lash_core::ToolValue::Attachment(lash_core::AttachmentSource::stored(reference)),
     ))
 }
 
@@ -644,6 +695,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_attach_as_enables_native_binary_attachment() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, [0, 1, 2, 3]).unwrap();
+
+        let default_result = lash_core::testing::run_tool(
+            &read_file_provider(),
+            "read_file",
+            &json!({"path": path.to_str().unwrap()}),
+        )
+        .await;
+        assert!(
+            !default_result.is_success(),
+            "default binary behavior stays reject"
+        );
+
+        let attached = lash_core::testing::run_tool(
+            &read_file_provider(),
+            "read_file",
+            &json!({
+                "path": path.to_str().unwrap(),
+                "attach_as": "application/octet-stream"
+            }),
+        )
+        .await;
+        assert!(attached.is_success());
+        let attachments = attached.as_output().attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].media_type().unwrap().as_str(),
+            "application/octet-stream"
+        );
+    }
+
+    #[tokio::test]
     async fn test_read_directory_returns_paginated_listing_without_ls_hint() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "").unwrap();
@@ -800,15 +886,18 @@ mod tests {
             })
             .await;
 
-        let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::Attachment(reference)) =
-            result.into_done_output().expect("read_file result").outcome
+        let lash_core::ToolCallOutcome::Success(lash_core::ToolValue::Attachment(
+            lash_core::AttachmentSource::Stored { attachment_ref },
+        )) = result.into_done_output().expect("read_file result").outcome
         else {
             panic!("expected attachment result");
         };
-        assert_eq!(reference.byte_len, data.len() as u64);
-        assert_eq!(reference.width, Some(1));
-        assert_eq!(reference.height, Some(1));
-        assert_eq!(store.get(&reference.id).await.unwrap().bytes, data);
+        assert_eq!(attachment_ref.byte_len, data.len() as u64);
+        assert_eq!(
+            attachment_ref.type_metadata,
+            Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1)))
+        );
+        assert_eq!(store.get(&attachment_ref.id).await.unwrap().bytes, data);
     }
 
     #[test]

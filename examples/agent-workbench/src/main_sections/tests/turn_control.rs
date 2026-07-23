@@ -19,7 +19,7 @@ mod turn_control_timeout_tests {
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -251,7 +251,7 @@ mod turn_control_timeout_tests {
 
     async fn turn_cancel_test_state(data_dir: &std::path::Path, admin_url: String) -> AppState {
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;

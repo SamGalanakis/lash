@@ -11,6 +11,41 @@ use sha2::{Digest, Sha256};
 
 use crate::store::{AttachmentIntent, AttachmentManifest, StoreError};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AttachmentProducer {
+    Host,
+    TurnIngress,
+    Tool { tool_name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("attachment source policy denied {producer:?}: {reason}")]
+pub struct AttachmentSourcePolicyError {
+    pub producer: AttachmentProducer,
+    pub reason: String,
+}
+
+pub trait AttachmentSourcePolicy: Send + Sync {
+    fn authorize(
+        &self,
+        producer: &AttachmentProducer,
+        source: &crate::AttachmentSource,
+    ) -> Result<(), AttachmentSourcePolicyError>;
+}
+
+#[derive(Debug, Default)]
+pub struct OpenAttachmentSourcePolicy;
+
+impl AttachmentSourcePolicy for OpenAttachmentSourcePolicy {
+    fn authorize(
+        &self,
+        _producer: &AttachmentProducer,
+        _source: &crate::AttachmentSource,
+    ) -> Result<(), AttachmentSourcePolicyError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AttachmentStoreError {
     #[error("attachment `{0}` was not found")]
@@ -113,9 +148,10 @@ pub trait AttachmentStore: Send + Sync {
     }
 }
 
-/// A source of the live attachment root set: every attachment ref (intent or
-/// committed) across ALL sessions a store factory owns. Intents count as refs,
-/// so an in-flight write is never mistaken for garbage.
+/// A source of the live attachment root set across every session a store
+/// factory owns. Committed refs and intents with owners that can still commit
+/// are roots; terminal-owner intents remain roots through their retention
+/// window. Unscoped host puts use the legacy age-only fallback.
 ///
 /// Implemented by session-store factories, which own the full set of sessions:
 /// a global manifest table answers in one query (Postgres); a per-session
@@ -125,21 +161,18 @@ pub trait AttachmentStore: Send + Sync {
 pub trait AttachmentRootSet: Send + Sync {
     /// The live root set, reconciled against `intent_grace_cutoff_epoch_ms`.
     ///
-    /// A committed ref is always a root. An *uncommitted* intent counts as a
-    /// root only while it is younger than the cutoff; an intent whose
-    /// `intent_at_epoch_ms` is at or before the cutoff is a crash orphan (its
-    /// turn never committed and has aged past the grace window), so the root set
-    /// forgets it and excludes it, making its blob collectable. The cutoff is
-    /// `now - grace_period_ms`; callers must set the grace period larger than the
-    /// longest expected turn so a live turn's intent is never mistaken for an
-    /// orphan (the same assumption the removed per-session sweep made).
+    /// A committed ref is always a root. An uncommitted intent remains a root
+    /// until both the cutoff has elapsed and its durable owner is proven unable
+    /// to commit. A turn owner is dead only after a superseding turn commit for
+    /// the session; a process owner is dead only after its durable process row
+    /// is pruned. An ownerless host intent retains the legacy age-only rule.
     async fn live_attachment_refs(
         &self,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<BTreeSet<AttachmentId>, StoreError>;
 
-    /// Whether a *single* id currently has a live root — a committed ref, or an
-    /// uncommitted intent younger than `intent_grace_cutoff_epoch_ms`.
+    /// Whether a single id currently has a live root under the same age plus
+    /// owner-reachability rule as [`Self::live_attachment_refs`].
     ///
     /// Targeted counterpart to [`Self::live_attachment_refs`] for the GC lever's
     /// delete-time root re-check (see [`reclaim_unreferenced_attachments`]): the
@@ -214,12 +247,11 @@ pub struct AttachmentReclamationReport {
 /// for attachment payloads.
 ///
 /// Enumerates every blob in `backend`, computes the live root set from
-/// `root_set` (committed refs plus intents younger than the grace window;
-/// intents aged past the window are reconciled away as crash orphans), and
-/// deletes every blob no session references. A `grace_period_ms` window protects
-/// blobs whose bytes are freshly written or whose intent is still in flight: any
-/// blob modified within the window is spared even if it currently looks
-/// unreferenced. Per-blob delete failures are collected into
+/// `root_set` (committed refs plus intents whose durable owners can still
+/// commit), and deletes every blob no session references. A `grace_period_ms`
+/// retention window delays reclamation after owner death and protects freshly
+/// written blobs even if they currently look unreferenced. Per-blob delete
+/// failures are collected into
 /// [`AttachmentReclamationReport::failed_ids`]; the sweep does not abort on the
 /// first failure.
 ///
@@ -228,21 +260,16 @@ pub struct AttachmentReclamationReport {
 /// `grace_period_ms` gates two independent hazards, both keyed off the same
 /// value:
 ///
-/// * *Aged uncommitted intents.* The root set forgets every intent older than
-///   `now - grace_period_ms` and excludes it, so a blob orphaned by a crash
-///   between `put` and the next turn commit is finally collectable. Intents
-///   younger than the window stay roots, so a live in-flight write is never
-///   swept.
+/// * *Terminal-owner retention.* An uncommitted intent older than
+///   `now - grace_period_ms` is forgotten only when its turn has been
+///   superseded, its process row has been pruned, or it has no durable owner.
+///   Age never proves a turn or process dead.
 /// * *Delete-time freshness race.* The `list` snapshot's `last_modified` is
 ///   stale by the time the sweep reaches a candidate. Before deleting, the sweep
 ///   re-fetches the blob's freshness with [`AttachmentStore::head`] and spares
 ///   any blob touched within the window — covering the interleaving where a new
 ///   intent plus a `put` of the same content id lands after the root snapshot
 ///   was taken (the `put` refreshes the blob's modification time).
-///
-/// The host must therefore set `grace_period_ms` larger than the longest
-/// expected turn, so neither a live turn's intent nor a just-written blob is
-/// ever reclaimed.
 ///
 /// # The delete window and its residual
 ///
@@ -268,9 +295,9 @@ pub struct AttachmentReclamationReport {
 ///
 /// # Policy is the host's (ADR-0014)
 ///
-/// This is a lever, not a scheduler: the host chooses `grace_period_ms`
-/// (larger than any live turn's duration so an in-flight `put` is never swept)
-/// and when to run it. It does no background work of its own.
+/// This is a lever, not a scheduler: the host chooses `grace_period_ms` as a
+/// post-terminal retention policy and chooses when to run it. The window is not
+/// a correctness bound on replay duration. The lever does no background work.
 pub async fn reclaim_unreferenced_attachments<R>(
     root_set: &R,
     backend: &dyn AttachmentStore,
@@ -499,7 +526,22 @@ pub struct SessionAttachmentStore {
     backend: Arc<dyn AttachmentStore>,
     manifest: Arc<dyn AttachmentManifest>,
     session_id: String,
-    pending_manifest_commit_ids: Mutex<BTreeSet<AttachmentId>>,
+    owner: Mutex<Option<(crate::AttachmentOwnerKind, String)>>,
+    clock: Arc<dyn crate::Clock>,
+}
+
+pub(crate) struct AttachmentOwnerBinding {
+    store: Arc<SessionAttachmentStore>,
+    kind: crate::AttachmentOwnerKind,
+    owner_id: String,
+    previous: Option<(crate::AttachmentOwnerKind, String)>,
+}
+
+impl Drop for AttachmentOwnerBinding {
+    fn drop(&mut self) {
+        self.store
+            .restore_owner(self.kind, &self.owner_id, self.previous.take());
+    }
 }
 
 impl SessionAttachmentStore {
@@ -508,22 +550,21 @@ impl SessionAttachmentStore {
         manifest: Arc<dyn AttachmentManifest>,
         session_id: impl Into<String>,
     ) -> Self {
-        Self::new_with_pending(backend, manifest, session_id, std::iter::empty())
+        Self::new_with_clock(backend, manifest, session_id, Arc::new(crate::SystemClock))
     }
 
-    pub fn new_with_pending(
+    pub(crate) fn new_with_clock(
         backend: Arc<dyn AttachmentStore>,
         manifest: Arc<dyn AttachmentManifest>,
         session_id: impl Into<String>,
-        pending_manifest_commit_ids: impl IntoIterator<Item = AttachmentId>,
+        clock: Arc<dyn crate::Clock>,
     ) -> Self {
         Self {
             backend,
             manifest,
             session_id: session_id.into(),
-            pending_manifest_commit_ids: Mutex::new(
-                pending_manifest_commit_ids.into_iter().collect(),
-            ),
+            owner: Mutex::new(None),
+            clock,
         }
     }
 
@@ -555,29 +596,52 @@ impl SessionAttachmentStore {
         self.backend.persistence()
     }
 
-    /// Attachment refs written through this facade that still need their
-    /// write-ahead manifest rows stamped by the next runtime commit.
-    pub fn pending_manifest_commit_ids(&self) -> Vec<AttachmentId> {
-        self.pending_manifest_commit_ids
-            .lock()
-            .expect("attachment manifest commit tracker lock")
-            .iter()
-            .cloned()
-            .collect()
+    /// Bind puts for the lifetime of a durable turn execution.
+    pub(crate) fn bind_turn_scoped(
+        self: &Arc<Self>,
+        turn_id: impl Into<String>,
+    ) -> AttachmentOwnerBinding {
+        self.bind_owner_scoped(crate::AttachmentOwnerKind::Turn, turn_id.into())
     }
 
-    /// Clear attachment refs that were stamped committed by a successful
-    /// runtime commit.
-    pub fn mark_manifest_committed(&self, ids: &[AttachmentId]) {
-        if ids.is_empty() {
-            return;
-        }
-        let mut pending = self
-            .pending_manifest_commit_ids
+    /// Bind puts for the lifetime of a recovered ToolCall or Engine process.
+    pub(crate) fn bind_process_scoped(
+        self: &Arc<Self>,
+        process_id: impl Into<String>,
+    ) -> AttachmentOwnerBinding {
+        self.bind_owner_scoped(crate::AttachmentOwnerKind::Process, process_id.into())
+    }
+
+    fn bind_owner_scoped(
+        self: &Arc<Self>,
+        kind: crate::AttachmentOwnerKind,
+        owner_id: String,
+    ) -> AttachmentOwnerBinding {
+        let previous = self
+            .owner
             .lock()
-            .expect("attachment manifest commit tracker lock");
-        for id in ids {
-            pending.remove(id);
+            .expect("attachment owner binding lock")
+            .replace((kind, owner_id.clone()));
+        AttachmentOwnerBinding {
+            store: Arc::clone(self),
+            kind,
+            owner_id,
+            previous,
+        }
+    }
+
+    fn restore_owner(
+        &self,
+        kind: crate::AttachmentOwnerKind,
+        owner_id: &str,
+        previous: Option<(crate::AttachmentOwnerKind, String)>,
+    ) {
+        let mut owner = self.owner.lock().expect("attachment owner binding lock");
+        if owner
+            .as_ref()
+            .is_some_and(|(current_kind, id)| *current_kind == kind && id == owner_id)
+        {
+            *owner = previous;
         }
     }
 
@@ -587,11 +651,18 @@ impl SessionAttachmentStore {
         meta: AttachmentCreateMeta,
     ) -> Result<AttachmentRef, AttachmentStoreError> {
         let attachment_id = content_id(&bytes);
+        let owner = self
+            .owner
+            .lock()
+            .expect("attachment owner binding lock")
+            .clone();
         let intent = AttachmentIntent {
             attachment_id: attachment_id.clone(),
             session_id: self.session_id.clone(),
             canonical_uri: attachment_uri(&attachment_id),
-            intent_at_epoch_ms: now_epoch_ms(),
+            intent_at_epoch_ms: self.clock.timestamp_ms(),
+            owner_kind: owner.as_ref().map(|(kind, _)| *kind),
+            owner_id: owner.map(|(_, id)| id),
         };
         // Record intent first. If this fails the bytes never land, matching the
         // write-ahead guarantee.
@@ -607,10 +678,6 @@ impl SessionAttachmentStore {
                 reference.id
             )));
         }
-        self.pending_manifest_commit_ids
-            .lock()
-            .expect("attachment manifest commit tracker lock")
-            .insert(reference.id.clone());
         Ok(reference)
     }
 
@@ -635,10 +702,6 @@ impl SessionAttachmentStore {
     pub async fn delete(&self, id: &AttachmentId) -> Result<(), AttachmentStoreError> {
         // Drop this session's manifest ref. Backend bytes stay put; they are
         // reclaimed by GC once no session references them.
-        self.pending_manifest_commit_ids
-            .lock()
-            .expect("attachment manifest commit tracker lock")
-            .remove(id);
         self.manifest.forget(&self.session_id, id).map_err(|err| {
             AttachmentStoreError::ManifestRecordFailed(format!(
                 "failed to forget attachment ref for `{id}`: {err}"
@@ -750,8 +813,7 @@ fn stored_meta(bytes: &[u8], meta: AttachmentCreateMeta) -> AttachmentMeta {
         content_id(bytes),
         meta.media_type,
         bytes.len() as u64,
-        meta.width,
-        meta.height,
+        meta.type_metadata,
         meta.label,
     )
 }
@@ -760,16 +822,17 @@ pub async fn resolve_llm_request_attachments(
     mut request: crate::llm::types::LlmRequest,
     store: &SessionAttachmentStore,
 ) -> Result<crate::llm::types::LlmRequest, AttachmentStoreError> {
-    for attachment in &mut request.attachments {
-        let Some(reference) = attachment.reference.as_ref() else {
+    for attachment in &request.attachments {
+        let crate::AttachmentSource::Stored { attachment_ref } = attachment else {
             continue;
         };
-        if !attachment.data.is_empty() {
+        if request.resolved_stored.contains_key(&attachment_ref.id) {
             continue;
         }
-        let stored = store.get(&reference.id).await?;
-        attachment.mime = reference.canonical_mime().to_string();
-        attachment.data = stored.bytes;
+        let stored = store.get(&attachment_ref.id).await?;
+        request
+            .resolved_stored
+            .insert(attachment_ref.id.clone(), stored.bytes);
     }
     Ok(request)
 }
@@ -777,7 +840,7 @@ pub async fn resolve_llm_request_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lash_sansio::{ImageMediaType, MediaType};
+    use lash_sansio::{AttachmentTypeMetadata, MediaType};
 
     #[derive(Default)]
     struct RecordingManifest {
@@ -797,6 +860,8 @@ mod tests {
                     canonical_uri: intent.canonical_uri,
                     intent_at_epoch_ms: intent.intent_at_epoch_ms,
                     committed_at_epoch_ms: None,
+                    owner_kind: intent.owner_kind,
+                    owner_id: intent.owner_id,
                 });
             Ok(())
         }
@@ -883,9 +948,8 @@ mod tests {
         ) -> Result<BTreeSet<AttachmentId>, crate::StoreError> {
             let mut refs = BTreeSet::new();
             for manifest in &self.manifests {
-                // Reconcile crash orphans: forget uncommitted intents aged past
-                // the grace cutoff so their blobs drop out of the root set, then
-                // union what remains (committed refs + young intents).
+                // This test root set contains only ownerless host puts, whose
+                // documented fallback remains age-only reconciliation.
                 for aged in manifest.list_uncommitted(intent_grace_cutoff_epoch_ms)? {
                     manifest.forget(&aged.session_id, &aged.attachment_id)?;
                 }
@@ -897,9 +961,8 @@ mod tests {
 
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
+            MediaType::parse("image/png").unwrap(),
+            Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("pixel".to_string()),
         )
     }
@@ -1052,8 +1115,8 @@ mod tests {
             "session-1",
         );
 
-        // Uncommitted intent, recorded just now: younger than the grace window,
-        // so it counts as a live root and its blob is spared.
+        // Fresh ownerless host intent: the legacy fallback retains it through
+        // the grace window.
         let reference = session.put(vec![3, 1, 4], meta()).await.expect("put");
         let root_set = RecordingRootSet {
             manifests: vec![manifest.clone()],
@@ -1069,9 +1132,8 @@ mod tests {
         );
     }
 
-    // Fix B: a crash orphan — an uncommitted intent aged past the grace window
-    // (its turn never committed) — is reconciled away, so its blob is collected.
-    // A fresh intent recorded in the same store survives the same sweep.
+    // Ownerless host puts have no durable liveness proof, so their fallback is
+    // age-only: an old intent is reconciled and a fresh one survives.
     #[tokio::test]
     async fn gc_collects_aged_uncommitted_intent_orphan() {
         let backend: Arc<dyn AttachmentStore> = Arc::new(InMemoryAttachmentStore::new());
@@ -1082,8 +1144,7 @@ mod tests {
             "session-1",
         );
 
-        // An uncommitted intent whose turn never committed. With a zero grace
-        // window it is already past the cutoff — the crash-orphan case.
+        // With a zero grace window the ownerless intent is already eligible.
         let orphan = session
             .put(vec![9, 9, 9], meta())
             .await
@@ -1318,28 +1379,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_facade_tracks_successful_puts_until_commit_mark() {
-        let manifest: Arc<dyn AttachmentManifest> = Arc::new(RecordingManifest::default());
-        let store = SessionAttachmentStore::new(
+    async fn session_facade_records_bound_owner_on_put() {
+        let manifest = Arc::new(RecordingManifest::default());
+        let store = Arc::new(SessionAttachmentStore::new(
             Arc::new(InMemoryAttachmentStore::new()),
-            manifest,
+            manifest.clone(),
             "session-1",
-        );
+        ));
+        let binding = store.bind_turn_scoped("turn-1");
 
         let reference = store.put(vec![8, 9, 10], meta()).await.expect("put");
-        assert_eq!(
-            store.pending_manifest_commit_ids(),
-            vec![reference.id.clone()]
-        );
+        {
+            let entries = manifest.entries.lock().expect("lock entries");
+            let entry = entries
+                .get(&("session-1".to_string(), reference.id))
+                .expect("manifest entry");
+            assert_eq!(entry.owner_kind, Some(crate::AttachmentOwnerKind::Turn));
+            assert_eq!(entry.owner_id.as_deref(), Some("turn-1"));
+        }
 
-        store.mark_manifest_committed(&[AttachmentId::new("other")]);
-        assert_eq!(
-            store.pending_manifest_commit_ids(),
-            vec![reference.id.clone()]
-        );
+        drop(binding);
+        let host_reference = store.put(vec![11, 12], meta()).await.expect("host put");
+        let entries = manifest.entries.lock().expect("lock entries");
+        let host_entry = entries
+            .get(&("session-1".to_string(), host_reference.id))
+            .expect("host manifest entry");
+        assert_eq!(host_entry.owner_kind, None);
+        assert_eq!(host_entry.owner_id, None);
+    }
 
-        store.mark_manifest_committed(std::slice::from_ref(&reference.id));
-        assert!(store.pending_manifest_commit_ids().is_empty());
+    #[tokio::test]
+    async fn nested_owner_binding_restores_the_previous_owner() {
+        let manifest = Arc::new(RecordingManifest::default());
+        let store = Arc::new(SessionAttachmentStore::new(
+            Arc::new(InMemoryAttachmentStore::new()),
+            manifest.clone(),
+            "session-1",
+        ));
+        let process_binding = store.bind_process_scoped("process-1");
+        let turn_binding = store.bind_turn_scoped("turn-1");
+
+        let turn_ref = store.put(vec![1], meta()).await.expect("turn put");
+        drop(turn_binding);
+        let process_ref = store.put(vec![2], meta()).await.expect("process put");
+        drop(process_binding);
+        let host_ref = store.put(vec![3], meta()).await.expect("host put");
+
+        let entries = manifest.entries.lock().expect("lock entries");
+        let turn = entries
+            .get(&("session-1".to_string(), turn_ref.id))
+            .expect("turn entry");
+        assert_eq!(turn.owner_kind, Some(crate::AttachmentOwnerKind::Turn));
+        assert_eq!(turn.owner_id.as_deref(), Some("turn-1"));
+        let process = entries
+            .get(&("session-1".to_string(), process_ref.id))
+            .expect("process entry");
+        assert_eq!(
+            process.owner_kind,
+            Some(crate::AttachmentOwnerKind::Process)
+        );
+        assert_eq!(process.owner_id.as_deref(), Some("process-1"));
+        let host = entries
+            .get(&("session-1".to_string(), host_ref.id))
+            .expect("host entry");
+        assert_eq!(host.owner_kind, None);
+        assert_eq!(host.owner_id, None);
     }
 
     #[tokio::test]
@@ -1363,6 +1467,8 @@ mod tests {
             session_id: "adapter-session".to_string(),
             canonical_uri: attachment_uri(&attachment_id),
             intent_at_epoch_ms: 10,
+            owner_kind: None,
+            owner_id: None,
         };
         adapter.record_intent(intent).expect("record intent");
         assert!(

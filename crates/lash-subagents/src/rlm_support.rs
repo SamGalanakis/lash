@@ -126,7 +126,6 @@ pub(crate) fn required_string(args: &Value, key: &str) -> Result<String, String>
 pub(crate) fn turn_input_for_task(text: String) -> TurnInput {
     TurnInput {
         items: vec![InputItem::Text { text }],
-        image_blobs: std::collections::HashMap::new(),
         protocol_turn_options: None,
         trace_turn_id: None,
         protocol_extension: None,

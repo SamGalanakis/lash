@@ -95,3 +95,20 @@ fn process_lease_decisions_use_the_postgres_clock() {
         );
     }
 }
+
+#[test]
+fn final_turn_commit_stamps_use_the_injected_store_clock() {
+    let region = source_region(
+        RUNTIME_PERSISTENCE,
+        "async fn commit_runtime_state(",
+        "async fn save_session_meta(",
+    );
+    assert!(
+        region.contains("let now = self.clock.timestamp_ms();"),
+        "final turn commit must sample the injected store clock"
+    );
+    assert!(
+        !region.contains("current_epoch_ms()"),
+        "final turn commit must not stamp from the client wall clock"
+    );
+}

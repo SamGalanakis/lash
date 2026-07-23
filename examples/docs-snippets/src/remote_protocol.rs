@@ -20,7 +20,6 @@ fn remote_turn_request(
             items: vec![RemoteInputItem::Text {
                 text: "Summarize this task.".to_string(),
             }],
-            image_blobs_base64: Default::default(),
             protocol_turn_options: None,
             trace_turn_id: Some(trace_turn_id.clone()),
             prompt_layer: None,

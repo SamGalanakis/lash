@@ -509,9 +509,12 @@ mod restate_tests {
             AppDb::open(&data_dir.join("app.db")).expect("open app db"),
         ));
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
-                .await
-                .expect("open process registry"),
+            lash_sqlite_store::SqliteProcessRegistry::open(
+                &data_dir.join("processes.db"),
+                data_dir.join("lash-sessions"),
+            )
+            .await
+            .expect("open process registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
         let provider = lash::testing::TestProvider::builder()
             .kind("mock-provider")

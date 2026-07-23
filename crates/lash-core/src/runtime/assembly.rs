@@ -828,7 +828,7 @@ pub(super) fn recovered_assistant_output_from_state(state: &crate::SessionSnapsh
                 .filter(|part| {
                     matches!(
                         part.kind,
-                        PartKind::Text | PartKind::Prose | PartKind::Image
+                        PartKind::Text | PartKind::Prose | PartKind::Attachment
                     )
                 })
                 .map(|part| part.content.as_str())

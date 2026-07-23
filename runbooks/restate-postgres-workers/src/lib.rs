@@ -1176,9 +1176,8 @@ impl E2eTools {
             .put(
                 bytes,
                 lash_core::AttachmentCreateMeta::new(
-                    lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
-                    Some(1),
-                    Some(1),
+                    lash_core::MediaType::parse("image/png").unwrap(),
+                    Some(lash_core::AttachmentTypeMetadata::image(Some(1), Some(1))),
                     Some(filename.to_string()),
                 ),
             )
@@ -1206,7 +1205,9 @@ impl E2eTools {
         );
         result.insert(
             "attachment".to_string(),
-            lash_core::ToolValue::Attachment(reference.clone()),
+            lash_core::ToolValue::Attachment(lash_core::AttachmentSource::stored(
+                reference.clone(),
+            )),
         );
         let result = lash_core::ToolValue::Object(result);
         let result_json = result.to_json_value();

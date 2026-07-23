@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::llm::types::AttachmentSource;
 use crate::{MessageOrigin, MessageRole, Part};
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +15,7 @@ pub struct PluginMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<Vec<u8>>,
+    pub attachments: Vec<AttachmentSource>,
 }
 
 impl PluginMessage {
@@ -25,7 +26,7 @@ impl PluginMessage {
             content: content.into(),
             origin: None,
             parts: Vec::new(),
-            images: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 

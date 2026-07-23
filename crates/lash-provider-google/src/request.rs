@@ -21,21 +21,69 @@ pub(crate) enum GoogleThinkingConfig {
 impl GoogleOAuthProvider {
     pub(crate) const PROVIDER_KIND: &'static str = "google_oauth";
 
-    pub(crate) fn inline_attachment_part(att: &LlmAttachment) -> Value {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&att.data);
-        json!({
-            "inlineData": {
-                "mimeType": att.mime,
-                "data": b64,
+    pub(crate) fn inline_attachment_part(req: &LlmRequest, source: &AttachmentSource) -> Value {
+        match source {
+            AttachmentSource::ProviderFile { id, .. } => {
+                json!({"fileData": {"fileUri": id}})
             }
-        })
+            AttachmentSource::ExternalUrl { .. } => unreachable!("validated as unsupported"),
+            AttachmentSource::Inline { .. } | AttachmentSource::Stored { .. } => {
+                let media_type = source.media_type().expect("MIME-bearing source");
+                let bytes = req
+                    .attachment_bytes(source)
+                    .expect("validated attachment bytes");
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                json!({
+                    "inlineData": {
+                        "mimeType": media_type,
+                        "data": data,
+                    }
+                })
+            }
+        }
+    }
+
+    pub(crate) fn validate_attachments(req: &LlmRequest) -> Result<(), LlmTransportError> {
+        for source in &req.attachments {
+            let supported = match source {
+                AttachmentSource::ExternalUrl { .. } => false,
+                AttachmentSource::ProviderFile { provider_scope, .. } => matches!(
+                    provider_scope.provider.to_ascii_lowercase().as_str(),
+                    "google" | "google_oauth" | "gemini"
+                ),
+                source => source.media_type().is_some_and(|mime| {
+                    GOOGLE_IMAGE_MIMES.contains(&mime.as_str())
+                        || matches!(mime.family(), "audio" | "text" | "video")
+                        || mime.as_str() == "application/pdf"
+                }),
+            };
+            if !supported {
+                let accepted_by = known_attachment_acceptors(source);
+                return Err(unsupported_attachment_capability(
+                    "Google Gemini",
+                    source,
+                    &accepted_by,
+                ));
+            }
+            if matches!(source, AttachmentSource::Stored { .. })
+                && req.attachment_bytes(source).is_none()
+            {
+                let mime = source.media_type().expect("stored source MIME");
+                return Err(LlmTransportError::new(format!(
+                    "Google Gemini could not materialize stored attachment MIME `{mime}` because session-guard resolution did not provide its bytes"
+                ))
+                .with_kind(ProviderFailureKind::Validation)
+                .with_code("stored_attachment_not_resolved"));
+            }
+        }
+        Ok(())
     }
 
     fn attachment_part_for_index(attachment_parts: &[Value], idx: usize) -> Value {
         attachment_parts
             .get(idx)
             .cloned()
-            .unwrap_or_else(|| json!({ "text": "[Image attached]" }))
+            .unwrap_or_else(|| json!({ "text": "[Attachment]" }))
     }
 
     fn valid_same_origin_text_signature(
@@ -98,7 +146,7 @@ impl GoogleOAuthProvider {
                         }
                         parts.push(part);
                     }
-                    LlmContentBlock::Image { attachment_idx } => {
+                    LlmContentBlock::Attachment { attachment_idx } => {
                         if matches!(msg.role, LlmRole::User) {
                             parts.push(Self::attachment_part_for_index(
                                 attachment_parts,

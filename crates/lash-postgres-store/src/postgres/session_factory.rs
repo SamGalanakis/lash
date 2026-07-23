@@ -10,6 +10,7 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
     ) -> Result<Arc<dyn RuntimePersistence>, String> {
         let store = PostgresSessionStore {
             pool: self.pool.clone(),
+            clock: Arc::clone(&self.clock),
             session_id: Some(request.session_id.clone()),
             bound_session: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -46,6 +47,7 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
     ) -> Result<Option<Arc<dyn RuntimePersistence>>, String> {
         let store = PostgresSessionStore {
             pool: self.pool.clone(),
+            clock: Arc::clone(&self.clock),
             session_id: Some(request.session_id.clone()),
             bound_session: Arc::new(OnceLock::new()),
             #[cfg(test)]
@@ -67,24 +69,9 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
 
     async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let mut tx = self.pool.begin().await.map_err(|err| err.to_string())?;
-        for sql in [
-            "DELETE FROM lash_queued_work_items WHERE batch_id IN (SELECT batch_id FROM lash_queued_work_batches WHERE session_id = $1)",
-            "DELETE FROM lash_queued_work_batches WHERE session_id = $1",
-            "DELETE FROM lash_pending_turn_inputs WHERE session_id = $1",
-            "DELETE FROM lash_session_execution_leases WHERE session_id = $1",
-            "DELETE FROM lash_usage_deltas WHERE session_id = $1",
-            "DELETE FROM lash_graph_nodes WHERE session_id = $1",
-            "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
-            "DELETE FROM lash_session_meta WHERE session_id = $1",
-            "DELETE FROM lash_sessions WHERE session_id = $1",
-            "DELETE FROM lash_attachment_manifest WHERE session_id = $1",
-        ] {
-            sqlx::query(sql)
-                .bind(session_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|err| err.to_string())?;
-        }
+        delete_session_tx(&mut tx, session_id)
+            .await
+            .map_err(|err| err.to_string())?;
         tx.commit().await.map_err(|err| err.to_string())
     }
 
@@ -92,16 +79,43 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
         &self,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<std::collections::BTreeSet<lash_core::AttachmentId>, lash_core::StoreError> {
-        // The manifest table is global to this deployment. Reconcile crash
-        // orphans and read the root set in one transaction: first delete every
-        // uncommitted intent aged past the cutoff (its turn never committed), then
-        // read the DISTINCT survivors (committed refs + young intents). Deleting
-        // the aged intent rows is what lets their blobs become collectable.
+        // Age is only a post-terminal retention policy. This single DELETE
+        // composes age with durable owner-death proof: a later committed turn
+        // supersedes a turn owner, a missing process row proves a process owner
+        // was pruned, and only unscoped host puts use age alone.
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
-        sqlx::query(
-            "DELETE FROM lash_attachment_manifest
-             WHERE committed_at_ms IS NULL AND intent_at_ms <= $1",
-        )
+        let process_dead = if self.process_registry_shared {
+            "OR (
+                manifest.owner_kind = 'process'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM lash_processes AS process
+                    WHERE process.process_id = manifest.owner_id
+                )
+            )"
+        } else {
+            ""
+        };
+        let delete_sql = format!(
+            "DELETE FROM lash_attachment_manifest AS manifest
+             WHERE manifest.committed_at_ms IS NULL
+               AND manifest.intent_at_ms <= $1
+               AND (
+                    manifest.owner_kind IS NULL
+                    OR (
+                        manifest.owner_kind = 'turn'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM lash_runtime_turn_commits AS turn_commit
+                            WHERE turn_commit.session_id = manifest.session_id
+                              AND turn_commit.turn_id <> manifest.owner_id
+                              AND turn_commit.committed_at_ms > manifest.intent_at_ms
+                        )
+                    )
+                    {process_dead}
+               )"
+        );
+        sqlx::query(&delete_sql)
         .bind(intent_grace_cutoff_epoch_ms as i64)
         .execute(&mut *tx)
         .await
@@ -122,16 +136,43 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
         id: &lash_core::AttachmentId,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<bool, lash_core::StoreError> {
-        // One indexed, read-only SELECT: a GC-live root is a committed ref or an
-        // uncommitted intent younger than the cutoff. Unlike `live_attachment_refs`
-        // this does not reconcile (delete) aged intents — it is the delete-time
-        // re-check probe run after the reconciling snapshot was already taken.
-        let row = sqlx::query(
-            "SELECT 1 FROM lash_attachment_manifest
-             WHERE attachment_id = $1
-               AND (committed_at_ms IS NOT NULL OR intent_at_ms > $2)
-             LIMIT 1",
-        )
+        // Read-only delete-time probe using the same age + owner-death predicate
+        // as reconciliation. A ref is live unless it is eligible for that
+        // conditional forget.
+        let process_dead = if self.process_registry_shared {
+            "OR (
+                manifest.owner_kind = 'process'
+                AND NOT EXISTS (
+                    SELECT 1 FROM lash_processes AS process
+                    WHERE process.process_id = manifest.owner_id
+                )
+            )"
+        } else {
+            ""
+        };
+        let select_sql = format!(
+            "SELECT 1 FROM lash_attachment_manifest AS manifest
+             WHERE manifest.attachment_id = $1
+               AND NOT (
+                    manifest.committed_at_ms IS NULL
+                    AND manifest.intent_at_ms <= $2
+                    AND (
+                        manifest.owner_kind IS NULL
+                        OR (
+                            manifest.owner_kind = 'turn'
+                            AND EXISTS (
+                                SELECT 1 FROM lash_runtime_turn_commits AS turn_commit
+                                WHERE turn_commit.session_id = manifest.session_id
+                                  AND turn_commit.turn_id <> manifest.owner_id
+                                  AND turn_commit.committed_at_ms > manifest.intent_at_ms
+                            )
+                        )
+                        {process_dead}
+                    )
+               )
+             LIMIT 1"
+        );
+        let row = sqlx::query(&select_sql)
         .bind(id.as_str())
         .bind(intent_grace_cutoff_epoch_ms as i64)
         .fetch_optional(&self.pool)
@@ -139,6 +180,35 @@ impl SessionStoreFactory for PostgresSessionStoreFactory {
         .map_err(store_sqlx_error)?;
         Ok(row.is_some())
     }
+}
+
+async fn delete_session_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+) -> Result<(), StoreError> {
+    // Attachment intents are released before the rest of the process-owned
+    // store. Process pruning calls this while its terminal row is still locked
+    // and deletes that row last, so any failure leaves a process leak instead
+    // of making live-looking session state ownerless.
+    for sql in [
+        "DELETE FROM lash_attachment_manifest WHERE session_id = $1",
+        "DELETE FROM lash_queued_work_items WHERE batch_id IN (SELECT batch_id FROM lash_queued_work_batches WHERE session_id = $1)",
+        "DELETE FROM lash_queued_work_batches WHERE session_id = $1",
+        "DELETE FROM lash_pending_turn_inputs WHERE session_id = $1",
+        "DELETE FROM lash_session_execution_leases WHERE session_id = $1",
+        "DELETE FROM lash_usage_deltas WHERE session_id = $1",
+        "DELETE FROM lash_graph_nodes WHERE session_id = $1",
+        "DELETE FROM lash_runtime_turn_commits WHERE session_id = $1",
+        "DELETE FROM lash_session_meta WHERE session_id = $1",
+        "DELETE FROM lash_sessions WHERE session_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(session_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(store_sqlx_error)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

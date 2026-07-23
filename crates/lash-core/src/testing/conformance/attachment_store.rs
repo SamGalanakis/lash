@@ -31,9 +31,8 @@ pub async fn attachment_store_reopenable<F>(
 
 fn attachment_meta() -> AttachmentCreateMeta {
     AttachmentCreateMeta::new(
-        MediaType::Image(ImageMediaType::Png),
-        Some(7),
-        Some(11),
+        MediaType::parse("image/png").unwrap(),
+        Some(AttachmentTypeMetadata::image(Some(7), Some(11))),
         Some("pixel".to_string()),
     )
 }
@@ -48,9 +47,11 @@ async fn attachment_put_get_round_trips_bytes_and_meta(store: Arc<dyn Attachment
 
     assert_eq!(stored.bytes, bytes, "bytes must round-trip unchanged");
     assert_eq!(reference.byte_len, bytes.len() as u64);
-    assert_eq!(reference.media_type, MediaType::Image(ImageMediaType::Png));
-    assert_eq!(reference.width, Some(7));
-    assert_eq!(reference.height, Some(11));
+    assert_eq!(reference.media_type.as_str(), "image/png");
+    assert_eq!(
+        reference.type_metadata,
+        Some(AttachmentTypeMetadata::image(Some(7), Some(11)))
+    );
     assert_eq!(reference.label.as_deref(), Some("pixel"));
 }
 

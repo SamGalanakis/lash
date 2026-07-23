@@ -13,6 +13,7 @@ impl RemoteLlmRequest {
             output_spec,
             stream_events: _,
             provider_trace: _,
+            resolved_stored: _,
         } = value;
         Self {
             protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -68,6 +69,7 @@ impl TryFrom<RemoteLlmRequest> for core_llm::LlmRequest {
                 .into_iter()
                 .map(TryInto::try_into)
                 .collect::<Result<Vec<_>, _>>()?,
+            resolved_stored: Default::default(),
             tools: Arc::new(tools.into_iter().map(Into::into).collect()),
             tool_choice: tool_choice.into(),
             model_variant: variant.into(),
@@ -467,7 +469,7 @@ impl From<core_llm::LlmContentBlock> for RemoteLlmContentBlock {
                 response_meta: response_meta.map(Into::into),
                 cache_breakpoint,
             },
-            core_llm::LlmContentBlock::Image { attachment_idx } => Self::ImageAttachment {
+            core_llm::LlmContentBlock::Attachment { attachment_idx } => Self::Attachment {
                 attachment_index: attachment_idx,
             },
             core_llm::LlmContentBlock::ToolCall {
@@ -510,7 +512,7 @@ impl From<RemoteLlmContentBlock> for core_llm::LlmContentBlock {
                 response_meta: response_meta.map(Into::into),
                 cache_breakpoint,
             },
-            RemoteLlmContentBlock::ImageAttachment { attachment_index } => Self::Image {
+            RemoteLlmContentBlock::Attachment { attachment_index } => Self::Attachment {
                 attachment_idx: attachment_index,
             },
             RemoteLlmContentBlock::ToolCall {
@@ -635,71 +637,90 @@ impl From<RemoteProviderReasoningReplay> for core_llm::ProviderReasoningReplay {
     }
 }
 
-impl From<core_llm::LlmAttachment> for RemoteLlmAttachment {
-    fn from(value: core_llm::LlmAttachment) -> Self {
-        let core_llm::LlmAttachment {
-            mime,
-            data,
-            reference,
-        } = value;
-        Self {
-            id: reference.as_ref().map(|reference| reference.id.to_string()),
-            mime,
-            data_base64: (!data.is_empty())
-                .then(|| base64::engine::general_purpose::STANDARD.encode(data)),
-            reference: reference.map(Into::into),
-            metadata: HashMap::new(),
+impl From<core_llm::AttachmentSource> for RemoteAttachmentSource {
+    fn from(value: core_llm::AttachmentSource) -> Self {
+        match value {
+            core_llm::AttachmentSource::Inline { media_type, bytes } => Self::Inline {
+                media_type: media_type.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            },
+            core_llm::AttachmentSource::Stored { attachment_ref } => Self::Stored {
+                attachment_ref: attachment_ref.into(),
+            },
+            core_llm::AttachmentSource::ExternalUrl { media_type, url } => Self::ExternalUrl {
+                media_type: media_type.to_string(),
+                url,
+            },
+            core_llm::AttachmentSource::ProviderFile { provider_scope, id } => {
+                Self::ProviderFile {
+                    provider_scope: provider_scope.into(),
+                    id,
+                }
+            }
         }
     }
 }
 
-impl TryFrom<RemoteLlmAttachment> for core_llm::LlmAttachment {
+impl TryFrom<RemoteAttachmentSource> for core_llm::AttachmentSource {
     type Error = RemoteProtocolError;
 
-    fn try_from(value: RemoteLlmAttachment) -> Result<Self, Self::Error> {
-        let RemoteLlmAttachment {
-            id,
-            mime,
-            data_base64,
-            reference,
-            metadata: _,
-        } = value;
-        let data = match data_base64 {
-            Some(encoded) => base64::engine::general_purpose::STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|err| RemoteProtocolError::InvalidImageBlob {
-                    id: id.unwrap_or_else(|| "<inline>".to_string()),
+    fn try_from(value: RemoteAttachmentSource) -> Result<Self, Self::Error> {
+        match value {
+            RemoteAttachmentSource::Inline {
+                media_type,
+                data_base64,
+            } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64.as_bytes())
+                .map_err(|err| RemoteProtocolError::InvalidAttachmentData {
+                    id: "<inline-attachment>".to_string(),
                     message: err.to_string(),
-                })?,
-            None => Vec::new(),
-        };
-        Ok(Self {
-            mime,
-            data,
-            reference: reference.map(TryInto::try_into).transpose()?,
-        })
+                })?;
+                Ok(Self::inline(parse_media_type(&media_type)?, bytes))
+            }
+            RemoteAttachmentSource::Stored { attachment_ref } => {
+                Ok(Self::stored(attachment_ref.try_into()?))
+            }
+            RemoteAttachmentSource::ExternalUrl { media_type, url } => {
+                Ok(Self::external_url(parse_media_type(&media_type)?, url))
+            }
+            RemoteAttachmentSource::ProviderFile { provider_scope, id } => {
+                Ok(Self::provider_file(provider_scope.into(), id))
+            }
+        }
+    }
+}
+
+impl From<core_llm::ProviderFileScope> for RemoteProviderFileScope {
+    fn from(value: core_llm::ProviderFileScope) -> Self {
+        Self {
+            provider: value.provider,
+            credential_scope: value.credential_scope,
+        }
+    }
+}
+
+impl From<RemoteProviderFileScope> for core_llm::ProviderFileScope {
+    fn from(value: RemoteProviderFileScope) -> Self {
+        Self::new(value.provider, value.credential_scope)
     }
 }
 
 impl From<lash_core::AttachmentRef> for RemoteAttachmentRef {
     fn from(value: lash_core::AttachmentRef) -> Self {
-        let mime = value.canonical_mime().to_string();
         let lash_core::AttachmentRef {
             id,
-            media_type: _,
+            media_type,
             byte_len,
-            width,
-            height,
+            type_metadata,
             label,
         } = value;
         Self {
             id: id.to_string(),
-            mime,
+            media_type: media_type.to_string(),
             byte_len,
-            width,
-            height,
+            type_metadata: type_metadata.map(Into::into),
             label,
-            metadata: HashMap::new(),
         }
     }
 }
@@ -711,27 +732,46 @@ impl TryFrom<RemoteAttachmentRef> for lash_core::AttachmentRef {
         value.validate()?;
         let RemoteAttachmentRef {
             id,
-            mime,
+            media_type,
             byte_len,
-            width,
-            height,
+            type_metadata,
             label,
-            metadata: _,
         } = value;
-        let media_type = lash_core::MediaType::from_mime(&mime).ok_or_else(|| {
-            RemoteProtocolError::InvalidAttachmentRef {
-                id: id.clone(),
-                message: format!("unsupported attachment mime `{mime}`"),
-            }
-        })?;
+        let media_type = parse_media_type(&media_type)?;
         Ok(Self {
             id: lash_core::AttachmentId::new(id),
             media_type,
             byte_len,
-            width,
-            height,
+            type_metadata: type_metadata.map(Into::into),
             label,
         })
+    }
+}
+
+fn parse_media_type(value: &str) -> Result<lash_core::MediaType, RemoteProtocolError> {
+    lash_core::MediaType::parse(value).map_err(|err| RemoteProtocolError::InvalidAttachmentRef {
+        id: "<media-type>".to_string(),
+        message: err.to_string(),
+    })
+}
+
+impl From<lash_core::AttachmentTypeMetadata> for RemoteAttachmentTypeMetadata {
+    fn from(value: lash_core::AttachmentTypeMetadata) -> Self {
+        match value {
+            lash_core::AttachmentTypeMetadata::Image { width, height } => {
+                Self::Image { width, height }
+            }
+        }
+    }
+}
+
+impl From<RemoteAttachmentTypeMetadata> for lash_core::AttachmentTypeMetadata {
+    fn from(value: RemoteAttachmentTypeMetadata) -> Self {
+        match value {
+            RemoteAttachmentTypeMetadata::Image { width, height } => {
+                Self::Image { width, height }
+            }
+        }
     }
 }
 

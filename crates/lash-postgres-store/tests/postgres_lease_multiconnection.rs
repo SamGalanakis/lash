@@ -41,6 +41,10 @@ use lash_core::{
 };
 use lash_postgres_store::PostgresStorage;
 
+mod support;
+
+use support::SharedDatabaseLock;
+
 fn database_url() -> Option<String> {
     std::env::var("LASH_POSTGRES_DATABASE_URL").ok()
 }
@@ -139,12 +143,13 @@ fn success(tag: &str) -> ProcessAwaitOutput {
 /// a real-time expiry reclaim while the stale host is definitively fenced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_lease_clock_and_fencing_hold_across_independent_connections() {
-    if database_url().is_none() {
+    let Some(database_url) = database_url() else {
         eprintln!(
             "skipping Postgres multi-connection lease test: LASH_POSTGRES_DATABASE_URL is not set"
         );
         return;
-    }
+    };
+    let _database_lock = SharedDatabaseLock::acquire(&database_url).await;
 
     // Three INDEPENDENT PostgresStorage instances => three separate sqlx pools,
     // hence three independent database connections. Host A and Host B are the

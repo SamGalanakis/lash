@@ -472,6 +472,18 @@ impl SessionCommitStore for Store {
                                 .map_err(sqlite_error)?;
                         }
                     }
+                    if let Some(turn_commit) = &commit.turn_commit {
+                        tx.execute(
+                            "UPDATE attachment_manifest
+                             SET committed_at_ms = COALESCE(committed_at_ms, ?1)
+                             WHERE session_id = ?2
+                               AND owner_kind = 'turn'
+                               AND owner_id = ?3
+                               AND committed_at_ms IS NULL",
+                            params![now as i64, commit.session_id, turn_commit.turn_id],
+                        )
+                        .map_err(sqlite_error)?;
+                    }
                     let mut enqueued_queue_batches = Vec::new();
                     for (index, batch) in commit.enqueued_queue_batches.iter().enumerate() {
                         if batch.session_id != commit.session_id {

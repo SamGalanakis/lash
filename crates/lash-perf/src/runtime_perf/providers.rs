@@ -1865,7 +1865,7 @@ fn request_text(request: &LlmRequest) -> String {
                     out.push_str(input_json);
                 }
                 LlmContentBlock::Reasoning { text, .. } => out.push_str(text),
-                LlmContentBlock::Image { .. } => {}
+                LlmContentBlock::Attachment { .. } => {}
             }
             out.push('\n');
         }
@@ -1878,6 +1878,7 @@ fn empty_request() -> LlmRequest {
         model: "mock-model".to_string(),
         messages: Vec::new(),
         attachments: Vec::new(),
+        resolved_stored: Default::default(),
         tools: std::sync::Arc::new(Vec::new()),
         tool_choice: Default::default(),
         generation: Default::default(),

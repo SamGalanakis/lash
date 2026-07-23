@@ -537,12 +537,6 @@ impl LashRuntime {
         self.mark_phase_begin(RuntimeTurnPhase::FinalCommit);
         let queued_work_completion_trace = commit_effects.completed_queue_claims.clone();
         let turn_input_completion_trace = commit_effects.completed_turn_input_claims.clone();
-        let pending_attachment_ids = self
-            .host
-            .core
-            .durability
-            .attachment_store
-            .pending_manifest_commit_ids();
         let enqueued_queue_batches = match turn_pipeline
             .final_commit(
                 &mut returned_turn,
@@ -560,7 +554,6 @@ impl LashRuntime {
                 // terminal race cannot strand pending-active input or make a
                 // replay observe a different delivery boundary.
                 Some(trace_turn_id.clone()),
-                pending_attachment_ids.clone(),
                 release_session_execution_lease
                     .then(|| session_execution_lease.map(SessionExecutionLeaseGuard::completion))
                     .flatten(),
@@ -582,11 +575,6 @@ impl LashRuntime {
         } else {
             session_execution_lease.and_then(SessionExecutionLeaseGuard::continuity)
         };
-        self.host
-            .core
-            .durability
-            .attachment_store
-            .mark_manifest_committed(&pending_attachment_ids);
         self.mark_phase_end(RuntimeTurnPhase::FinalCommit);
 
         emit_session_events_to_sink(events, finalized.events).await;
@@ -1259,9 +1247,19 @@ impl LashRuntime {
             ));
         }
         self.ensure_durable_store_facets_for_scope(&scoped_effect_controller)?;
-        input
+        let turn_id = input
             .trace_turn_id
-            .get_or_insert_with(|| scoped_effect_controller.scope_id().to_string());
+            .get_or_insert_with(|| scoped_effect_controller.scope_id().to_string())
+            .clone();
+        // The stable execution-scope turn id is attached to every write-ahead
+        // intent before ingress, tools, plugins, or envelope normalization can
+        // put bytes. Replays bind the same id; no live pending-id state is used.
+        let _attachment_owner_binding = self
+            .host
+            .core
+            .durability
+            .attachment_store
+            .bind_turn_scoped(turn_id);
         Box::pin(self.stream_turn_inner(
             input.clone(),
             events,
@@ -1353,7 +1351,6 @@ impl LashRuntime {
             .map(crate::TurnInputClaim::materialize_for_turn);
         if let Some(work) = pending_turn_input.as_ref()
             && input.items.is_empty()
-            && input.image_blobs.is_empty()
         {
             input = work.clone();
             if input.trace_turn_id.is_none() {
@@ -1362,7 +1359,6 @@ impl LashRuntime {
         }
         if let Some(work) = queued_turn_work.as_ref()
             && input.items.is_empty()
-            && input.image_blobs.is_empty()
         {
             input = work.input.clone();
             if input.trace_turn_id.is_none() {
@@ -1389,10 +1385,7 @@ impl LashRuntime {
                 })?;
         }
         let previous_prompt_usage = self.state.last_prompt_usage.clone();
-        let normalized = match self
-            .normalize_input_items(&input.items, &input.image_blobs)
-            .await
-        {
+        let normalized = match self.normalize_input_items(&input.items).await {
             Ok(items) => items,
             Err(e) => {
                 self.state.last_prompt_usage = None;
@@ -1531,14 +1524,12 @@ impl LashRuntime {
                         response_meta: None,
                     });
                 }
-                NormalizedItem::Image(reference) => {
+                NormalizedItem::Attachment(source) => {
                     user_parts.push(Part {
                         id: format!("{}.p{}", user_id, user_parts.len()),
-                        kind: PartKind::Image,
+                        kind: PartKind::Attachment,
                         content: String::new(),
-                        attachment: Some(crate::session_model::message::PartAttachment {
-                            reference,
-                        }),
+                        attachment: Some(crate::session_model::message::PartAttachment { source }),
                         tool_call_id: None,
                         tool_name: None,
                         tool_replay: None,
@@ -2209,12 +2200,11 @@ impl LashRuntime {
     async fn normalize_input_items(
         &self,
         items: &[InputItem],
-        image_blobs: &HashMap<String, Vec<u8>>,
     ) -> Result<Vec<NormalizedItem>, String> {
         normalize_input_items(
             items,
-            image_blobs,
             self.host.core.durability.attachment_store.as_ref(),
+            self.host.core.attachment_source_policy.as_ref(),
         )
         .await
     }

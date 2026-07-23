@@ -108,8 +108,7 @@ impl AttachmentStore for FileAttachmentStore {
             content_id(&bytes),
             meta.media_type,
             bytes.len() as u64,
-            meta.width,
-            meta.height,
+            meta.type_metadata,
             meta.label,
         );
         let path = self.path_for_id(&meta.id);
@@ -279,15 +278,14 @@ fn delete_at_path(path: PathBuf) -> Result<(), AttachmentStoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ImageMediaType, MediaType};
+    use crate::{AttachmentTypeMetadata, MediaType};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     fn meta() -> AttachmentCreateMeta {
         AttachmentCreateMeta::new(
-            MediaType::Image(ImageMediaType::Png),
-            Some(1),
-            Some(1),
+            MediaType::parse("image/png").unwrap(),
+            Some(AttachmentTypeMetadata::image(Some(1), Some(1))),
             Some("pixel".to_string()),
         )
     }

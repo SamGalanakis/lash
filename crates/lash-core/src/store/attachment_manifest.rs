@@ -8,6 +8,23 @@
 
 use super::StoreError;
 
+/// Durable owner class for an attachment intent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentOwnerKind {
+    Turn,
+    Process,
+}
+
+impl AttachmentOwnerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Process => "process",
+        }
+    }
+}
+
 /// A pending attachment write recorded *before* the bytes hit the
 /// [`AttachmentStore`](crate::AttachmentStore) backend.
 ///
@@ -31,6 +48,11 @@ pub struct AttachmentIntent {
     /// Backends may map this identity onto their own path/key representation.
     pub canonical_uri: String,
     pub intent_at_epoch_ms: u64,
+    /// Stable durable owner that can eventually commit or release this intent.
+    /// Both owner fields are absent for direct host puts made outside a runtime
+    /// execution scope; those rows retain fallback timer semantics.
+    pub owner_kind: Option<AttachmentOwnerKind>,
+    pub owner_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +62,8 @@ pub struct AttachmentManifestEntry {
     pub canonical_uri: String,
     pub intent_at_epoch_ms: u64,
     pub committed_at_epoch_ms: Option<u64>,
+    pub owner_kind: Option<AttachmentOwnerKind>,
+    pub owner_id: Option<String>,
 }
 
 /// The synchronous attachment-manifest surface required from every
@@ -71,14 +95,11 @@ pub trait AttachmentManifest: Send + Sync {
     /// * An id with no row in *this* session (e.g. an attachment carried in from
     ///   conversation history or a parent session) is already rooted by the
     ///   session that recorded its intent — this session needs no row of its own.
-    /// * An id whose intent was *reconciled away* by GC (the crash-orphan sweep
-    ///   forgot an uncommitted intent aged past the grace window) also no-ops:
+    /// * An id whose intent was *reconciled away* by GC (after its durable owner
+    ///   was proven dead and the retention window elapsed) also no-ops:
     ///   because commit never re-inserts, it cannot resurrect a committed ref to
     ///   bytes GC may already have collected. The read side surfaces the missing
-    ///   bytes as `NotFound` rather than through a dangling root. This case can
-    ///   only arise when a turn outlives the GC grace period, which the host must
-    ///   prevent by setting the grace larger than the longest expected turn (the
-    ///   same invariant the removed per-session sweep assumed).
+    ///   bytes as `NotFound` rather than through a dangling root.
     fn commit_refs(
         &self,
         session_id: &str,
@@ -95,8 +116,9 @@ pub trait AttachmentManifest: Send + Sync {
     ) -> Result<Vec<AttachmentManifestEntry>, StoreError>;
 
     /// Atomically forget every *uncommitted* intent whose `intent_at_epoch_ms`
-    /// is at or before `intent_grace_cutoff_epoch_ms` — the crash-orphan
-    /// reconciliation GC runs before it snapshots the root set.
+    /// is at or before `intent_grace_cutoff_epoch_ms` and whose durable owner
+    /// is proven dead. Unscoped host puts have no owner proof and retain the
+    /// legacy age-only fallback.
     ///
     /// This MUST be a single conditional operation, not a `list_uncommitted`
     /// read followed by per-row `forget` calls. A concurrent `record_intent` for
@@ -107,23 +129,22 @@ pub trait AttachmentManifest: Send + Sync {
     /// predicate inside one delete closes that race: a refresh that bumps
     /// `intent_at` past the cutoff no longer matches, so the intent survives.
     ///
-    /// The default implementation is the racy read-then-forget; every backend
-    /// whose `record_intent` can run concurrently with reconciliation overrides
-    /// it with a genuinely atomic conditional delete.
+    /// The default implementation is conservative and forgets nothing. Durable
+    /// backends must implement the owner-death predicate in the same conditional
+    /// mutation as the age predicate; a read-then-forget implementation is not
+    /// sound.
     fn forget_aged_uncommitted_intents(
         &self,
         intent_grace_cutoff_epoch_ms: u64,
     ) -> Result<(), StoreError> {
-        for aged in self.list_uncommitted(intent_grace_cutoff_epoch_ms)? {
-            self.forget(&aged.session_id, &aged.attachment_id)?;
-        }
+        let _ = intent_grace_cutoff_epoch_ms;
         Ok(())
     }
 
     /// Whether this manifest currently holds a *GC-live* ref for `attachment_id`
-    /// — a committed ref, or an uncommitted intent younger than
-    /// `intent_grace_cutoff_epoch_ms` (`intent_at_epoch_ms >` cutoff). Aged
-    /// uncommitted intents (crash orphans) do NOT count.
+    /// — a committed ref, or an uncommitted intent that is not both aged and
+    /// owner-dead. The cutoff is retention policy after terminal proof, never a
+    /// liveness oracle for turn/process owners.
     ///
     /// This is the single-id counterpart to [`Self::list_all_refs`], used by the
     /// GC lever's delete-time root re-check to spare (and, post-delete, to alarm

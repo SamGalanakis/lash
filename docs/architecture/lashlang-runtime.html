@@ -150,7 +150,7 @@ finish { reviewed: len(batch), by_owner: by_owner, errors: errors }
           </div>
           <dl class="def-list">
             <dt><code>print(image)</code></dt>
-            <dd>Collects image values recursively, registers their attachment refs, and sends provider-visible <code>LlmContentBlock::Image</code> content alongside descriptor text.</dd>
+            <dd>Collects image values recursively, registers their stored refs, and sends provider-visible <code>LlmContentBlock::Attachment</code> content alongside descriptor text.</dd>
             <dt><code>finish(image)</code></dt>
             <dd>Serializes metadata only, using a JSON-compatible descriptor with id, label, size, width, and height. It does not embed base64 data.</dd>
           </dl>

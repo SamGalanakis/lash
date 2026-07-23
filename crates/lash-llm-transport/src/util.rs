@@ -5,11 +5,6 @@
 use lash_sansio::llm::types::{LlmProviderTraceEvent, LlmProviderTraceSender};
 use serde_json::Value;
 
-/// Image MIME types accepted by the OpenAI/Anthropic-flavored providers
-/// (OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages).
-/// Pass to [`lash_core::llm::transport::validate_image_attachments`].
-pub const OPENAI_IMAGE_MIMES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
-
 /// Forward a raw provider event to the trace sink, deriving an event name from
 /// the JSON `type` (or `event`) field when present.
 pub fn emit_provider_trace(tx: Option<&LlmProviderTraceSender>, provider: &'static str, raw: &str) {

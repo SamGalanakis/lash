@@ -79,7 +79,6 @@ async fn tool_result_projector_only_changes_model_observation() {
                 items: vec![InputItem::Text {
                     text: "run the tool".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -157,7 +156,6 @@ async fn completed_turns_are_persisted_for_custom_runtime_store() {
                 items: vec![InputItem::Text {
                     text: "where did this go?".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,
@@ -281,7 +279,6 @@ async fn completed_turns_are_persisted_in_session_graph() {
                 items: vec![InputItem::Text {
                     text: "where did this go?".to_string(),
                 }],
-                image_blobs: HashMap::new(),
                 protocol_turn_options: None,
                 trace_turn_id: None,
                 protocol_extension: None,

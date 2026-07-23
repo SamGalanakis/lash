@@ -11,6 +11,7 @@
 //! `lash::testing::conformance`.
 
 mod artifact_store;
+mod attachment_owner;
 mod attachment_store;
 mod await_event_cold;
 mod effect_host;
@@ -27,6 +28,7 @@ mod trigger_store;
 mod turn_control;
 
 pub use artifact_store::*;
+pub use attachment_owner::*;
 pub use attachment_store::*;
 pub use await_event_cold::*;
 pub use effect_host::*;
@@ -68,7 +70,7 @@ use crate::{
     TurnEvent,
 };
 use crate::{AttachmentStore, AttachmentStoreError, AttachmentStorePersistence, DurabilityTier};
-use lash_sansio::{AttachmentCreateMeta, ImageMediaType, MediaType};
+use lash_sansio::{AttachmentCreateMeta, AttachmentTypeMetadata, MediaType};
 
 #[cfg(test)]
 mod tests {

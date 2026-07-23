@@ -475,7 +475,7 @@ pub struct ChatContextProjector;
 impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
     fn project(&self, ctx: ProjectorContext<'_, M>) -> Arc<LlmRequest> {
         let rendered_prompt = render_messages_for_projector(ctx.messages, ctx.turn_causes);
-        let attachments: Vec<LlmAttachment> = rendered_prompt.attachments;
+        let attachments: Vec<AttachmentSource> = rendered_prompt.attachments;
         let mut messages = rendered_prompt.messages;
         if let Some(turn_events) = render_turn_causes_prompt(ctx.turn_causes) {
             messages.push(crate::llm::types::LlmMessage::text(
@@ -497,6 +497,7 @@ impl<M: TurnProtocol> ContextProjector<M> for ChatContextProjector {
             model: ctx.config.model.clone(),
             messages,
             attachments,
+            resolved_stored: Default::default(),
             tools: if ctx.use_tools {
                 Arc::clone(&ctx.config.tool_specs)
             } else {

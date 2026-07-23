@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use super::*;
 use crate::{
-    AbandonRequest, DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness, ProcessExecutionEnvRef,
-    ProcessInput, ProcessListFilter, ProcessRegistration, ProcessStarted, ProcessStatus,
-    TestLocalProcessRegistry, TriggerStore,
+    AbandonRequest, AttachmentStore, DurabilityTier, LeaseOwnerIdentity, LeaseOwnerLiveness,
+    ProcessExecutionEnvRef, ProcessInput, ProcessListFilter, ProcessRegistration, ProcessStarted,
+    ProcessStatus, TestLocalProcessRegistry, TriggerStore,
 };
+
+mod attachment_owner_tests;
 
 const TEST_PROCESS_EXECUTION_CONCURRENCY: usize = 4;
 

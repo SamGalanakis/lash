@@ -288,7 +288,9 @@ pub(crate) async fn execute_prepared_tool_attempt_effect<'run>(
         ToolCallLaunch::Done(outcome) => {
             let mut record = outcome.record;
             record.call_id = Some(call_id);
-            crate::ToolAttemptLaunch::Done { record }
+            crate::ToolAttemptLaunch::Done {
+                record: Box::new(record),
+            }
         }
         ToolCallLaunch::Pending(pending) => crate::ToolAttemptLaunch::Pending {
             key: pending.key,

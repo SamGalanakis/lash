@@ -1291,6 +1291,11 @@ impl ProcessRegistry for PostgresProcessRegistry {
         let mut pruned_events = 0;
         let mut pruned_processes = 0;
         for process_id in prunable {
+            for session_id in lash_core::process_runtime_session_ids(&process_id) {
+                delete_session_tx(&mut tx, &session_id)
+                    .await
+                    .map_err(|err| PluginError::Session(err.to_string()))?;
+            }
             pruned_events += sqlx::query("DELETE FROM lash_process_events WHERE process_id = $1")
                 .bind(&process_id)
                 .execute(&mut *tx)

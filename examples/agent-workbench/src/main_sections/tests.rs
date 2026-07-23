@@ -421,7 +421,7 @@ mod tests {
         let process_registry = Arc::new(sync_await({
             let path = data_dir.join("processes.db");
             async move {
-                lash_sqlite_store::SqliteProcessRegistry::open(&path)
+                lash_sqlite_store::SqliteProcessRegistry::open(&path, path.with_extension("sessions"))
                     .await
                     .expect("open registry")
             }
@@ -495,7 +495,7 @@ mod tests {
         let process_registry = Arc::new(sync_await({
             let path = data_dir.join("processes.db");
             async move {
-                lash_sqlite_store::SqliteProcessRegistry::open(&path)
+                lash_sqlite_store::SqliteProcessRegistry::open(&path, path.with_extension("sessions"))
                     .await
                     .expect("open registry")
             }
@@ -757,7 +757,7 @@ finish "gap source"
         ));
         std::fs::create_dir_all(&data_dir).expect("create temp workbench dir");
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -892,7 +892,7 @@ finish "gap source"
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -965,7 +965,7 @@ finish "gap source"
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -1041,7 +1041,7 @@ finish initial
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -1201,7 +1201,7 @@ finish initial
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -1401,7 +1401,7 @@ finish initial
         let core_store_factory: Arc<dyn lash::persistence::SessionStoreFactory> =
             session_store_factory;
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"))
+            lash_sqlite_store::SqliteProcessRegistry::open(&data_dir.join("processes.db"), data_dir.join("lash-sessions"))
                 .await
                 .expect("open registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -2044,7 +2044,7 @@ finish initial
             let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
                 artifact_store.clone();
             let process_registry = Arc::new(
-                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+                lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path, process_registry_path.with_extension("sessions"))
                     .await
                     .expect("open registry"),
             ) as Arc<dyn lash::process::ProcessRegistry>;
@@ -2086,7 +2086,7 @@ finish initial
         let artifact_store_for_core: Arc<dyn lashlang::LashlangArtifactStore> =
             artifact_store.clone();
         let process_registry = Arc::new(
-            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path)
+            lash_sqlite_store::SqliteProcessRegistry::open(&process_registry_path, process_registry_path.with_extension("sessions"))
                 .await
                 .expect("reopen registry"),
         ) as Arc<dyn lash::process::ProcessRegistry>;

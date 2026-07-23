@@ -49,9 +49,10 @@ pub enum DurabilityTier {
 
 // Re-exports
 pub use attachments::{
-    AttachmentReclamationReport, AttachmentRootSet, AttachmentStore, AttachmentStoreError,
-    AttachmentStorePersistence, FileAttachmentStore, InMemoryAttachmentStore,
-    NoopAttachmentManifest, SessionAttachmentStore, StoredAttachment, StoredBlobRef,
+    AttachmentProducer, AttachmentReclamationReport, AttachmentRootSet, AttachmentSourcePolicy,
+    AttachmentSourcePolicyError, AttachmentStore, AttachmentStoreError, AttachmentStorePersistence,
+    FileAttachmentStore, InMemoryAttachmentStore, NoopAttachmentManifest,
+    OpenAttachmentSourcePolicy, SessionAttachmentStore, StoredAttachment, StoredBlobRef,
     reclaim_unreferenced_attachments,
 };
 pub use chronological::{
@@ -63,34 +64,36 @@ pub use direct::{
     DirectOutputSpec, DirectPart, DirectRequest, DirectRole,
 };
 pub use lash_sansio::llm::types::{
-    AttemptOutcome, AttemptRecord, ExecutionEvidence, GenerationOptions, LlmCallId, LlmCallRecord,
-    LlmOutputPart, LlmRequest, LlmRequestScope, LlmResponse, LlmTerminalReason, NormalizedError,
-    ProtocolPosition, RetryDecision,
+    AttachmentSource, AttemptOutcome, AttemptRecord, ExecutionEvidence, GenerationOptions,
+    LlmCallId, LlmCallRecord, LlmOutputPart, LlmRequest, LlmRequestScope, LlmResponse,
+    LlmTerminalReason, NormalizedError, ProtocolPosition, ProviderFileScope, RetryDecision,
 };
 pub use lash_sansio::{
     AcceptedInjectedTurnInput, AttachmentCreateMeta, AttachmentId, AttachmentMeta, AttachmentRef,
-    BaseRenderCache, CheckpointDelivery, CheckpointKind, CompactToolContract, EffectId,
-    ErrorEnvelope, ExecImage, ExecResponse, ImageMediaType, LashSchema, LlmCallError, MediaType,
-    Message, MessageOrigin, MessageRole, MessageSequence, ModelToolReturn, ModelToolReturnPart,
-    Part, PartKind, PluginMessage, PluginRuntimeEvent, PreparedPrompt, ProjectionMode,
-    PromptBuildInput, PromptBuiltin, PromptContext, PromptContribution, PromptContributionGate,
-    PromptContributionSet, PromptFingerprint, PromptLayer, PromptSlot, PromptSlotLayer,
-    PromptTemplate, PromptTemplateEntry, PromptTemplateSection, ProviderSchemaCapabilities,
-    PruneState, RenderedPrompt, ResolvedPromptLayer, ResolvedSchema, Response, SchemaContract,
-    SchemaDialect, SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose,
-    SchemaResolutionError, SchemaResolutionRequest, SessionAppendNode, SessionStreamEvent,
-    TextProjectionMetadata, TokenUsage, ToolActivation, ToolArgumentProjectionPolicy,
-    ToolCallOutcome, ToolCallOutput, ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog,
-    ToolCatalogBuildInput, ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition,
-    ToolFailure, ToolFailureClass, ToolFailureSource, ToolId, ToolManifest, ToolOutputContract,
-    ToolRetryDisposition, ToolRetryPolicy, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage,
-    TurnOutcome, TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog,
-    build_turn, default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
+    AttachmentTypeMetadata, BaseRenderCache, CheckpointDelivery, CheckpointKind,
+    CompactToolContract, EffectId, ErrorEnvelope, ExecImage, ExecResponse, InvalidMediaType,
+    LashSchema, LlmCallError, MediaType, Message, MessageOrigin, MessageRole, MessageSequence,
+    ModelToolReturn, ModelToolReturnPart, Part, PartKind, PluginMessage, PluginRuntimeEvent,
+    PreparedPrompt, ProjectionMode, PromptBuildInput, PromptBuiltin, PromptContext,
+    PromptContribution, PromptContributionGate, PromptContributionSet, PromptFingerprint,
+    PromptLayer, PromptSlot, PromptSlotLayer, PromptTemplate, PromptTemplateEntry,
+    PromptTemplateSection, ProviderSchemaCapabilities, PruneState, RenderedPrompt,
+    ResolvedPromptLayer, ResolvedSchema, Response, SchemaContract, SchemaDialect,
+    SchemaProjectionOverride, SchemaProjectionPolicy, SchemaPurpose, SchemaResolutionError,
+    SchemaResolutionRequest, SessionAppendNode, SessionStreamEvent, TextProjectionMetadata,
+    TokenUsage, ToolActivation, ToolArgumentProjectionPolicy, ToolCallOutcome, ToolCallOutput,
+    ToolCallRecord, ToolCallStatus, ToolCancellation, ToolCatalog, ToolCatalogBuildInput,
+    ToolCatalogEntry, ToolContract, ToolControl, ToolDefinition, ToolFailure, ToolFailureClass,
+    ToolFailureSource, ToolId, ToolManifest, ToolOutputContract, ToolRetryDisposition,
+    ToolRetryPolicy, ToolValue, TurnCause, TurnFinish, TurnLimitFinalMessage, TurnOutcome,
+    TurnStop, append_assistant_text_part, build_prompt, build_tool_catalog, build_turn,
+    default_prompt_template, head_tail_truncate, messages_are_prompt_resume_safe,
     normalized_response_parts, project_anthropic_bedrock_schema, project_for_dialect,
     prompt_template_fingerprint, prompt_text_fingerprint, prompt_tool_names_fingerprint,
     reasoning_part, render_turn_causes_prompt, resolve_prompt_layers, resolve_schema, shared_parts,
     validate_tool_input, visible_response_parts, visible_response_text_from_parts,
 };
+pub use store::AttachmentOwnerKind;
 
 /// Project a successful tool control into its terminal turn outcome.
 ///
@@ -420,10 +423,11 @@ pub use runtime::{
     TurnInputCompletion, TurnInputIngress, TurnInputState, TurnIssue, TurnOptions, TurnTerminal,
     TurnWorkDriver, UnavailableProcessService, UsageReportRow, UsageTotals, WaitKind, WaitState,
     apply_process_status_projection, current_epoch_ms, diff_token_ledger, diff_usage_reports,
-    ensure_durable_effect_input, epoch_ms_from_system_time, process_signal_event_type,
-    process_signal_name_from_event_type, process_signal_wait_key, process_wake_delivery,
-    system_time_from_epoch_ms, terminal_append_request, terminal_event_type_name,
-    validate_process_signal_name, watch_process_registry, watch_process_registry_with_sink,
+    ensure_durable_effect_input, epoch_ms_from_system_time, process_runtime_session_ids,
+    process_signal_event_type, process_signal_name_from_event_type, process_signal_wait_key,
+    process_wake_delivery, system_time_from_epoch_ms, terminal_append_request,
+    terminal_event_type_name, validate_process_signal_name, watch_process_registry,
+    watch_process_registry_with_sink,
 };
 pub use runtime::{DEFAULT_PROCESS_EXECUTION_CONCURRENCY, ProcessExecutionConcurrencyError};
 #[allow(unused_imports)]

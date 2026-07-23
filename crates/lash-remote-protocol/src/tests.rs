@@ -30,12 +30,9 @@ fn remote_llm_request_json_round_trips() {
                 cache_breakpoint: false,
             }],
         }],
-        attachments: vec![RemoteLlmAttachment {
-            id: Some("img".to_string()),
-            mime: "image/png".to_string(),
-            data_base64: Some("AQID".to_string()),
-            reference: None,
-            metadata: HashMap::new(),
+        attachments: vec![RemoteAttachmentSource::Inline {
+            media_type: "image/png".to_string(),
+            data_base64: "AQID".to_string(),
         }],
         tools: Vec::new(),
         tool_choice: RemoteLlmToolChoice::Auto,
@@ -54,6 +51,43 @@ fn remote_llm_request_json_round_trips() {
     assert_eq!(decoded.request_id, request.request_id);
     assert_eq!(decoded.scope, request.scope);
     assert_eq!(decoded.messages, request.messages);
+}
+
+#[test]
+fn remote_attachment_media_types_are_validated_syntactically() {
+    let mut request = RemoteLlmRequest {
+        protocol_version: REMOTE_PROTOCOL_VERSION,
+        request_id: "request-invalid-mime".to_string(),
+        scope: RemoteLlmRequestScope::new("session", "session:frame:test", "request-invalid-mime"),
+        model_intent: RemoteModelIntent::new("gpt-test"),
+        messages: Vec::new(),
+        attachments: vec![RemoteAttachmentSource::ExternalUrl {
+            media_type: "not a mime".to_string(),
+            url: "https://example.test/file".to_string(),
+        }],
+        tools: Vec::new(),
+        tool_choice: RemoteLlmToolChoice::Auto,
+        output_spec: None,
+        generation: RemoteGenerationOptions::default(),
+        metadata: HashMap::new(),
+    };
+
+    let error = request
+        .validate()
+        .expect_err("invalid MIME must fail validation");
+    assert!(
+        error
+            .to_string()
+            .contains("syntactically valid type/subtype")
+    );
+
+    request.attachments = vec![RemoteAttachmentSource::ExternalUrl {
+        media_type: "audio/mpeg".to_string(),
+        url: "https://example.test/file".to_string(),
+    }];
+    request
+        .validate()
+        .expect("arbitrary valid MIME is accepted");
 }
 
 #[test]
@@ -105,11 +139,13 @@ fn remote_turn_request_json_round_trips() {
                 RemoteInputItem::Text {
                     text: "first".to_string(),
                 },
-                RemoteInputItem::ImageRef {
-                    id: "img".to_string(),
+                RemoteInputItem::Attachment {
+                    source: RemoteAttachmentSource::Inline {
+                        media_type: "image/png".to_string(),
+                        data_base64: "AQID".to_string(),
+                    },
                 },
             ],
-            image_blobs_base64: HashMap::from([("img".to_string(), "AQID".to_string())]),
             protocol_turn_options: Some(RemoteProtocolTurnOptions {
                 payload: serde_json::json!({ "answer": "raw" }),
             }),
@@ -127,7 +163,12 @@ fn remote_turn_request_json_round_trips() {
 
     assert_eq!(decoded.protocol_version, REMOTE_PROTOCOL_VERSION);
     assert_eq!(decoded.session_id, "session");
-    assert_eq!(decoded.input.image_blobs_base64["img"], "AQID");
+    assert!(matches!(
+        &decoded.input.items[1],
+        RemoteInputItem::Attachment {
+            source: RemoteAttachmentSource::Inline { data_base64, .. }
+        } if data_base64 == "AQID"
+    ));
     assert_eq!(decoded.tool_grants.len(), 1);
 }
 
@@ -800,8 +841,8 @@ fn wrong_protocol_versions_are_rejected() {
     assert!(matches!(
         request.validate(),
         Err(RemoteProtocolError::UnsupportedProtocolVersion {
-            actual: 12,
-            expected: 13,
+            actual: 13,
+            expected: 14,
         })
     ));
 
@@ -883,7 +924,7 @@ fn nested_protocol_versions_must_match_envelope() {
 
 #[test]
 fn remote_process_env_ref_is_validated_but_serializes_as_string() {
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 13);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 14);
     let env_ref: RemoteProcessExecutionEnvRef =
         canonical_env_ref().parse().expect("canonical env ref");
     assert_eq!(env_ref.as_str(), canonical_env_ref());

@@ -69,9 +69,11 @@ fn turn_input_round_trips_remote_safe_fields() {
     let mut input = lash_core::TurnInput::items([
         lash_core::InputItem::text("a"),
         lash_core::InputItem::text("b"),
-        lash_core::InputItem::image_ref("img"),
+        lash_core::InputItem::attachment(lash_core::AttachmentSource::inline(
+            lash_core::MediaType::parse("image/png").unwrap(),
+            vec![1, 2, 3],
+        )),
     ])
-    .with_image_blob("img", vec![1, 2, 3])
     .with_protocol_turn_options(lash_core::ProtocolTurnOptions::from_payload(
         serde_json::json!({ "mode": "remote" }),
     ))
@@ -80,7 +82,12 @@ fn turn_input_round_trips_remote_safe_fields() {
 
     let remote = RemoteTurnInput::try_from(input).expect("remote conversion");
     assert_eq!(remote.items.len(), 3);
-    assert_eq!(remote.image_blobs_base64["img"], "AQID");
+    assert!(matches!(
+        &remote.items[2],
+        RemoteInputItem::Attachment {
+            source: RemoteAttachmentSource::Inline { data_base64, .. }
+        } if data_base64 == "AQID"
+    ));
     assert_eq!(remote.trace_turn_id.as_deref(), Some("trace-1"));
     assert_eq!(
         remote.protocol_turn_options.as_ref().unwrap().payload,
@@ -89,7 +96,12 @@ fn turn_input_round_trips_remote_safe_fields() {
     assert_eq!(remote.prompt_layer, Some(prompt.clone().into()));
 
     let core = lash_core::TurnInput::try_from(remote).expect("core conversion");
-    assert_eq!(core.image_blobs["img"], vec![1, 2, 3]);
+    assert!(matches!(
+        &core.items[2],
+        lash_core::InputItem::Attachment {
+            source: lash_core::AttachmentSource::Inline { bytes, .. }
+        } if bytes == &[1, 2, 3]
+    ));
     assert_eq!(core.trace_turn_id.as_deref(), Some("trace-1"));
     assert_eq!(
         core.protocol_turn_options.unwrap().payload,
@@ -144,7 +156,11 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     let request = core_llm::LlmRequest {
         model: "gpt-test".to_string(),
         messages: vec![core_llm::LlmMessage::text(core_llm::LlmRole::User, "hello")],
-        attachments: vec![core_llm::LlmAttachment::bytes("image/png", vec![1, 2, 3])],
+        attachments: vec![core_llm::AttachmentSource::inline(
+            lash_core::MediaType::parse("image/png").unwrap(),
+            vec![1, 2, 3],
+        )],
+        resolved_stored: Default::default(),
         tools: Arc::new(vec![core_llm::LlmToolSpec {
             name: "search".to_string(),
             description: "Search".to_string(),
@@ -245,7 +261,10 @@ fn llm_request_and_response_round_trip_owned_dtos() {
     assert_eq!(core.session_id(), "session-1");
     assert_eq!(core.agent_frame_id(), "session-1:frame:test");
     assert_eq!(core.request_id(), "session-1:request:test");
-    assert_eq!(core.attachments[0].data, vec![1, 2, 3]);
+    assert!(matches!(
+        &core.attachments[0],
+        core_llm::AttachmentSource::Inline { bytes, .. } if bytes == &[1, 2, 3]
+    ));
     assert_eq!(
         core.tools[0].input_schema.projection.overrides[0].dialect,
         lash_core::SchemaDialect::OPENAI_TOOL_PARAMETERS

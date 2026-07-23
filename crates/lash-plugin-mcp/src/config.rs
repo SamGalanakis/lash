@@ -25,6 +25,10 @@ fn is_default_call_timeout_ms(value: &u64) -> bool {
     *value == DEFAULT_CALL_TIMEOUT_MS
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Connection configuration for one MCP server. Tag (`transport`) selects
 /// the wire transport; per-variant fields configure that transport.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,6 +53,9 @@ pub enum McpServerConfig {
             skip_serializing_if = "is_default_call_timeout_ms"
         )]
         call_timeout_ms: u64,
+        /// Persist non-image MCP binary content as model attachments.
+        #[serde(default, skip_serializing_if = "is_false")]
+        binary_content_attachments: bool,
     },
     /// Newer MCP spec HTTP/JSON streaming transport.
     StreamableHttp {
@@ -65,6 +72,9 @@ pub enum McpServerConfig {
             skip_serializing_if = "is_default_call_timeout_ms"
         )]
         call_timeout_ms: u64,
+        /// Persist non-image MCP binary content as model attachments.
+        #[serde(default, skip_serializing_if = "is_false")]
+        binary_content_attachments: bool,
     },
     /// Older MCP spec HTTP+SSE transport.
     Sse {
@@ -81,6 +91,9 @@ pub enum McpServerConfig {
             skip_serializing_if = "is_default_call_timeout_ms"
         )]
         call_timeout_ms: u64,
+        /// Persist non-image MCP binary content as model attachments.
+        #[serde(default, skip_serializing_if = "is_false")]
+        binary_content_attachments: bool,
     },
 }
 
@@ -94,6 +107,7 @@ impl McpServerConfig {
             cwd: None,
             startup_timeout_ms: default_startup_timeout_ms(),
             call_timeout_ms: default_call_timeout_ms(),
+            binary_content_attachments: false,
         }
     }
 
@@ -104,6 +118,7 @@ impl McpServerConfig {
             headers: BTreeMap::new(),
             startup_timeout_ms: default_startup_timeout_ms(),
             call_timeout_ms: default_call_timeout_ms(),
+            binary_content_attachments: false,
         }
     }
 
@@ -114,6 +129,7 @@ impl McpServerConfig {
             headers: BTreeMap::new(),
             startup_timeout_ms: default_startup_timeout_ms(),
             call_timeout_ms: default_call_timeout_ms(),
+            binary_content_attachments: false,
         }
     }
 
@@ -145,6 +161,41 @@ impl McpServerConfig {
         })
     }
 
+    pub fn with_binary_content_attachments(mut self, enabled: bool) -> Self {
+        match &mut self {
+            Self::Stdio {
+                binary_content_attachments,
+                ..
+            }
+            | Self::StreamableHttp {
+                binary_content_attachments,
+                ..
+            }
+            | Self::Sse {
+                binary_content_attachments,
+                ..
+            } => *binary_content_attachments = enabled,
+        }
+        self
+    }
+
+    pub(crate) fn binary_content_attachments(&self) -> bool {
+        match self {
+            Self::Stdio {
+                binary_content_attachments,
+                ..
+            }
+            | Self::StreamableHttp {
+                binary_content_attachments,
+                ..
+            }
+            | Self::Sse {
+                binary_content_attachments,
+                ..
+            } => *binary_content_attachments,
+        }
+    }
+
     pub(crate) fn validate(&self, server_name: &str) -> Result<(), McpError> {
         if server_name.trim().is_empty() {
             return Err(McpError::Config(
@@ -167,5 +218,25 @@ impl McpServerConfig {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_attachment_opt_in_is_explicit_and_defaults_off() {
+        let default = McpServerConfig::stdio("mcp-server", Vec::new());
+        assert!(!default.binary_content_attachments());
+        let json = serde_json::to_value(&default).unwrap();
+        assert!(json.get("binary_content_attachments").is_none());
+
+        let enabled = default.with_binary_content_attachments(true);
+        assert!(enabled.binary_content_attachments());
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["binary_content_attachments"],
+            true
+        );
     }
 }

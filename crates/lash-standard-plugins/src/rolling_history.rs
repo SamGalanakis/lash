@@ -7,7 +7,6 @@
 //! the first-party default tool bundles from `lash-standard-plugins`,
 //! so standard lash sessions pick it up automatically.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -33,8 +32,8 @@ const PRUNE_CONTEXT_THRESHOLD: f64 = 0.6;
 pub(crate) const ROLLING_HISTORY_PLUGIN_ID: &str = "rolling_history";
 const COMPACTION_SUMMARY_TITLE: &str = "Compaction summary:";
 const COMPACTION_PROMPT: &str = "Provide a detailed summary of the conversation above so a later session can continue the work without the full history.\n\nUse this template:\n---\n## Goal\n[What is the user trying to accomplish?]\n\n## Instructions\n- [Relevant instructions or constraints]\n\n## Discoveries\n[Important findings, failures, or decisions]\n\n## Accomplished\n[What is done, what is in progress, what remains]\n\n## Relevant files / directories\n[List important files or directories]\n---";
-const PRUNED_IMAGE_PLACEHOLDER: &str = "[Image omitted from older context]";
-const COMPACTED_IMAGE_PLACEHOLDER: &str = "[Image omitted during compaction]";
+const PRUNED_ATTACHMENT_PLACEHOLDER: &str = "[Attachment omitted from older context]";
+const COMPACTED_ATTACHMENT_PLACEHOLDER: &str = "[Attachment omitted during compaction]";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RollingHistoryConfig;
@@ -76,8 +75,8 @@ fn approx_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-fn strip_image_attachment(part: &mut Part, placeholder: &str) -> bool {
-    if !matches!(part.kind, PartKind::Image) || part.attachment.is_none() {
+fn strip_attachment(part: &mut Part, placeholder: &str) -> bool {
+    if !matches!(part.kind, PartKind::Attachment) || part.attachment.is_none() {
         return false;
     }
     part.attachment = None;
@@ -85,7 +84,7 @@ fn strip_image_attachment(part: &mut Part, placeholder: &str) -> bool {
     true
 }
 
-fn prune_old_images(messages: &mut [Message]) -> bool {
+fn prune_old_attachments(messages: &mut [Message]) -> bool {
     let mut changed = false;
     let mut recent_user_turns = 0usize;
 
@@ -100,18 +99,18 @@ fn prune_old_images(messages: &mut [Message]) -> bool {
             continue;
         }
         for part in std::sync::Arc::make_mut(&mut messages[msg_idx].parts).iter_mut() {
-            changed |= strip_image_attachment(part, PRUNED_IMAGE_PLACEHOLDER);
+            changed |= strip_attachment(part, PRUNED_ATTACHMENT_PLACEHOLDER);
         }
     }
 
     changed
 }
 
-fn strip_all_image_attachments(messages: &mut [Message], placeholder: &str) -> bool {
+fn strip_all_attachments(messages: &mut [Message], placeholder: &str) -> bool {
     let mut changed = false;
     for message in messages {
         for part in std::sync::Arc::make_mut(&mut message.parts).iter_mut() {
-            changed |= strip_image_attachment(part, placeholder);
+            changed |= strip_attachment(part, placeholder);
         }
     }
     changed
@@ -145,7 +144,7 @@ fn find_compaction_cut_point(messages: &[Message], prefix_len: usize) -> usize {
         for part in messages[idx].parts.iter() {
             accumulated += approx_token_count(&part.content);
             if part.attachment.is_some() {
-                accumulated += 1200; // approximate image token cost
+                accumulated += 1200; // approximate binary attachment token cost
             }
         }
         if accumulated >= COMPACTION_KEEP_RECENT_TOKENS && messages[idx].role == MessageRole::User {
@@ -233,7 +232,7 @@ async fn summarize_compaction_prefix(
     let mut snapshot = lash_core::runtime::RuntimeSessionState::from_snapshot(state.clone());
     snapshot.policy.max_turns = Some(1);
     let mut messages = prefix_messages;
-    strip_all_image_attachments(&mut messages, COMPACTED_IMAGE_PLACEHOLDER);
+    strip_all_attachments(&mut messages, COMPACTED_ATTACHMENT_PLACEHOLDER);
     snapshot.execution_state_snapshot = None;
     snapshot.last_prompt_usage = None;
     let previous_summary = extract_previous_summary(&messages);
@@ -279,7 +278,6 @@ async fn summarize_compaction_prefix(
         &turn_id,
         TurnInput {
             items: vec![InputItem::Text { text: prompt_text }],
-            image_blobs: HashMap::new(),
             protocol_turn_options: None,
             trace_turn_id: None,
             protocol_extension: None,
@@ -420,7 +418,7 @@ impl TurnContextTransform for RollingTurnTransform {
         let messages = input.messages.make_mut();
 
         if needs_pruning {
-            prune_old_images(messages);
+            prune_old_attachments(messages);
         }
 
         if !needs_compaction {
@@ -507,17 +505,16 @@ mod tests {
             role,
             parts: vec![Part {
                 id: format!("{id}.p0"),
-                kind: PartKind::Image,
+                kind: PartKind::Attachment,
                 content: String::new(),
                 attachment: Some(lash_core::session_model::message::PartAttachment {
-                    reference: lash_core::AttachmentRef {
+                    source: lash_core::AttachmentSource::stored(lash_core::AttachmentRef {
                         id: lash_core::AttachmentId::new(format!("{id}-att")),
-                        media_type: lash_core::MediaType::Image(lash_core::ImageMediaType::Png),
+                        media_type: lash_core::MediaType::parse("image/png").unwrap(),
                         byte_len: bytes.len() as u64,
-                        width: None,
-                        height: None,
+                        type_metadata: None,
                         label: None,
-                    },
+                    }),
                 }),
                 tool_call_id: None,
                 tool_name: None,
@@ -626,9 +623,9 @@ mod tests {
             .messages;
 
         let image_part = built[0].parts.first().expect("image part");
-        assert!(matches!(image_part.kind, PartKind::Image));
+        assert!(matches!(image_part.kind, PartKind::Attachment));
         assert!(image_part.attachment.is_none());
-        assert_eq!(image_part.content, PRUNED_IMAGE_PLACEHOLDER);
+        assert_eq!(image_part.content, PRUNED_ATTACHMENT_PLACEHOLDER);
     }
 
     #[tokio::test]

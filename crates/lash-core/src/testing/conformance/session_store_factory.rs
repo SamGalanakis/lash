@@ -18,6 +18,87 @@ where
     session_store_factory_delete_removes_store_and_is_idempotent(make()).await;
 }
 
+/// Process-retention conformance: pruning a terminal process releases its
+/// attachment intents and removes both durable session stores owned by the
+/// process before the process row disappears.
+pub async fn process_prune_deletes_owned_session_stores(
+    factory: Arc<dyn crate::SessionStoreFactory>,
+    registry: Arc<dyn crate::ProcessRegistry>,
+) {
+    const PROCESS_ID: &str = "process-prune-owned-session-stores";
+    registry
+        .register_process(crate::ProcessRegistration::new(
+            PROCESS_ID,
+            crate::ProcessInput::External {
+                metadata: serde_json::Value::Null,
+            },
+            crate::RecoveryDisposition::ExternallyOwned,
+            crate::ProcessProvenance::host(),
+        ))
+        .await
+        .expect("register process with owned stores");
+
+    let mut requests = Vec::new();
+    for (index, session_id) in crate::process_runtime_session_ids(PROCESS_ID)
+        .into_iter()
+        .enumerate()
+    {
+        let request = crate::SessionStoreCreateRequest {
+            session_id: session_id.clone(),
+            relation: crate::SessionRelation::default(),
+            policy: crate::SessionPolicy::default(),
+        };
+        let store = factory
+            .create_store(&request)
+            .await
+            .expect("create process-owned session store");
+        crate::AttachmentManifest::record_intent(
+            store.as_ref(),
+            crate::AttachmentIntent {
+                attachment_id: crate::AttachmentId::new(format!(
+                    "process-owned-session-intent-{index}"
+                )),
+                session_id,
+                canonical_uri: format!("lash-attachment://process-owned-{index}"),
+                intent_at_epoch_ms: 1,
+                owner_kind: Some(crate::AttachmentOwnerKind::Process),
+                owner_id: Some(PROCESS_ID.to_string()),
+            },
+        )
+        .expect("record process-owned attachment intent");
+        requests.push(request);
+    }
+
+    let terminal = registry
+        .complete_process(
+            PROCESS_ID,
+            crate::ProcessAwaitOutput::Success {
+                value: serde_json::Value::Null,
+                control: None,
+            },
+            crate::ProcessCompletionAuthority::external_owner("prune-session-store-test"),
+        )
+        .await
+        .expect("complete process with owned stores");
+    let report = registry
+        .prune_terminal_processes(terminal.updated_at_ms.saturating_add(1), None, None)
+        .await
+        .expect("prune process with owned stores");
+    assert_eq!(report.pruned_processes, 1);
+
+    for request in requests {
+        assert!(
+            factory
+                .open_existing_store(&request)
+                .await
+                .expect("probe pruned process-owned store")
+                .is_none(),
+            "process prune left session store {} behind",
+            request.session_id
+        );
+    }
+}
+
 /// Exercise the shared-bytes attachment contract: identical bytes across
 /// sessions dedup to one blob, the session-boundary guard keeps sessions from
 /// resolving each other's blobs, and mark-and-sweep GC collects a blob only
@@ -69,15 +150,13 @@ pub async fn attachment_ownership_isolation_with_store(
         b_request.session_id.clone(),
     );
     let png = AttachmentCreateMeta::new(
-        MediaType::Image(ImageMediaType::Png),
-        Some(10),
-        Some(20),
+        MediaType::parse("image/png").unwrap(),
+        Some(AttachmentTypeMetadata::image(Some(10), Some(20))),
         Some("a.png".to_string()),
     );
     let jpeg = AttachmentCreateMeta::new(
-        MediaType::Image(ImageMediaType::Jpeg),
-        Some(30),
-        Some(40),
+        MediaType::parse("image/jpeg").unwrap(),
+        Some(AttachmentTypeMetadata::image(Some(30), Some(40))),
         Some("b.jpg".to_string()),
     );
 
@@ -106,16 +185,15 @@ pub async fn attachment_ownership_isolation_with_store(
 
     // Session B writes identical bytes: ONE physical blob, divergent reference
     // presentation. Commit B's ref too, so the multi-session GC narrative below
-    // rests on stable committed roots rather than grace-aged intents (an
-    // in-flight intent aged past the grace cutoff is a crash orphan the sweep
-    // reconciles away — covered separately in the attachment unit tests).
+    // rests on stable committed roots rather than the age-only fallback used by
+    // these deliberately ownerless facade puts.
     let b_ref = session_b
         .put(vec![6, 2, 6, 4], jpeg)
         .await
         .expect("put identical bytes for b");
     assert_eq!(a_ref.id, b_ref.id, "identical bytes share one content id");
-    assert_eq!(a_ref.canonical_mime(), "image/png");
-    assert_eq!(b_ref.canonical_mime(), "image/jpeg");
+    assert_eq!(a_ref.media_type.as_str(), "image/png");
+    assert_eq!(b_ref.media_type.as_str(), "image/jpeg");
     assert_eq!(a_ref.label.as_deref(), Some("a.png"));
     assert_eq!(b_ref.label.as_deref(), Some("b.jpg"));
     session_b

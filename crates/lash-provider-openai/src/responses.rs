@@ -9,7 +9,7 @@ impl OpenAiCompatibleProvider {
         req: &LlmRequest,
         stream: bool,
     ) -> Result<Value, LlmTransportError> {
-        validate_image_attachments(req, OPENAI_IMAGE_MIMES, "OpenAI Responses")?;
+        shared::validate_responses_attachments(req, "OpenAI Responses")?;
         let compat = self.resolved_compat(CompletionEndpoint::Responses);
         let tools = shared::build_tools_with_capabilities(
             PROVIDER,

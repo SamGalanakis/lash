@@ -204,6 +204,7 @@ impl SessionCommitStore for PostgresSessionStore {
         &self,
         commit: RuntimeCommit,
     ) -> Result<RuntimeCommitResult, StoreError> {
+        let now = self.clock.timestamp_ms();
         let mut tx = self.pool.begin().await.map_err(store_sqlx_error)?;
         // Read the head WITHOUT a lock. The session execution lease is the
         // primary cross-runner serialization point; the conditional CAS write
@@ -522,6 +523,22 @@ impl SessionCommitStore for PostgresSessionStore {
             &commit.committed_attachment_ids,
         )
         .await?;
+        if let Some(turn_commit) = &commit.turn_commit {
+            sqlx::query(
+                "UPDATE lash_attachment_manifest
+                 SET committed_at_ms = COALESCE(committed_at_ms, $1)
+                 WHERE session_id = $2
+                   AND owner_kind = 'turn'
+                   AND owner_id = $3
+                   AND committed_at_ms IS NULL",
+            )
+            .bind(now as i64)
+            .bind(&commit.session_id)
+            .bind(&turn_commit.turn_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+        }
         let mut enqueued_queue_batches = Vec::new();
         for batch in &commit.enqueued_queue_batches {
             if batch.session_id != commit.session_id {
@@ -549,7 +566,7 @@ impl SessionCommitStore for PostgresSessionStore {
             .bind(&completed.turn_id)
             .bind(&completed.turn_commit_hash)
             .bind(encode_json(&result))
-            .bind(current_epoch_ms() as i64)
+            .bind(now as i64)
             .execute(&mut *tx)
             .await
             .map_err(store_sqlx_error)?;
