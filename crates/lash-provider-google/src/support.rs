@@ -8,7 +8,8 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 
 pub(crate) use lash_core::llm::transport::{
-    LlmTransportError, ProviderFailureKind, unsupported_attachment_capability,
+    GOOGLE_FILE_MIMES, GOOGLE_IMAGE_MIMES, GOOGLE_MEDIA_FAMILIES, LlmTransportError,
+    ProviderFailureKind, known_attachment_acceptors, unsupported_attachment_capability,
 };
 pub(crate) use lash_core::llm::types::{
     AttachmentSource, LlmContentBlock, LlmOutputPart, LlmOutputSpec, LlmRequest, LlmResponse,
@@ -36,60 +37,6 @@ pub(crate) use lash_provider_auth::{
 };
 
 pub(crate) use crate::config::*;
-
-pub(crate) const GOOGLE_IMAGE_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-    "image/heic",
-    "image/heif",
-];
-
-pub(crate) fn known_attachment_acceptors(source: &AttachmentSource) -> Vec<&'static str> {
-    if let AttachmentSource::ProviderFile { provider_scope, .. } = source {
-        return match provider_scope.provider.to_ascii_lowercase().as_str() {
-            "openai" => vec!["OpenAI Responses"],
-            "anthropic" => vec!["Anthropic Messages"],
-            "google" | "google_oauth" | "gemini" => vec!["Google Gemini"],
-            _ => Vec::new(),
-        };
-    }
-    const OPENAI_IMAGES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
-    const OPENAI_FILES: &[&str] = &[
-        "application/pdf",
-        "application/json",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "text/csv",
-        "text/html",
-        "text/markdown",
-        "text/plain",
-    ];
-    let mime = source.media_type().expect("MIME-bearing source").as_str();
-    let borrowed_url = matches!(source, AttachmentSource::ExternalUrl { .. });
-    let mut providers = Vec::new();
-    if OPENAI_IMAGES.contains(&mime) || OPENAI_FILES.contains(&mime) {
-        providers.push("OpenAI Responses");
-    }
-    if OPENAI_IMAGES.contains(&mime) {
-        providers.push("OpenAI Chat Completions");
-        providers.push("Anthropic Messages");
-    } else if mime == "application/pdf" {
-        providers.push("Anthropic Messages");
-    }
-    if !borrowed_url
-        && (GOOGLE_IMAGE_MIMES.contains(&mime)
-            || matches!(mime.split_once('/'), Some(("audio" | "text" | "video", _)))
-            || mime == "application/pdf")
-    {
-        providers.push("Google Gemini");
-    }
-    providers
-}
 
 /// Mutable accumulators a single Cloud Code SSE event folds into: the running
 /// full text, the per-event text deltas, the usage snapshot (normalized plus

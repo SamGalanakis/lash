@@ -356,7 +356,7 @@ impl AnthropicProvider {
                 }
                 source => source.media_type().is_some_and(|mime| {
                     ANTHROPIC_IMAGE_MIMES.contains(&mime.as_str())
-                        || mime.as_str() == "application/pdf"
+                        || ANTHROPIC_FILE_MIMES.contains(&mime.as_str())
                 }),
             };
             if !supported {
