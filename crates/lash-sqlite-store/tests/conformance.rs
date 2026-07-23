@@ -364,6 +364,28 @@ async fn sqlite_trigger_store_rejects_pre_keyed_schema_before_serving() {
 }
 
 #[tokio::test]
+async fn sqlite_effect_controller_rejects_pre_canonical_envelope_schema_before_serving() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pre-canonical-envelope-effects.db");
+    let conn = rusqlite::Connection::open(&path).expect("open legacy effect db");
+    conn.pragma_update(None, "user_version", 2)
+        .expect("stamp legacy effect schema");
+    drop(conn);
+
+    let error =
+        match SqliteRuntimeEffectController::open(&path, ExecutionScope::turn("session", "turn"))
+            .await
+        {
+            Ok(_) => panic!("pre-canonical-envelope effect stores must be recreated"),
+            Err(error) => error,
+        };
+    let message = error.to_string();
+    assert!(message.contains("Unsupported lash effect replay schema"));
+    assert!(message.contains("supports schema version 3"));
+    assert!(message.contains("delete the effect replay database and start fresh"));
+}
+
+#[tokio::test]
 async fn sqlite_trigger_ingress_skips_malformed_matching_subscription() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("malformed-trigger.db");
@@ -686,26 +708,15 @@ async fn sqlite_effect_controller_replays_without_local_executor() {
 }
 
 #[tokio::test]
-async fn sqlite_effect_controller_rejects_envelope_hash_conflict() {
+async fn sqlite_effect_controller_reports_envelope_divergent_paths() {
     let controller = SqliteRuntimeEffectController::memory(ExecutionScope::turn("session", "turn"))
         .await
         .expect("controller");
-    controller
-        .execute_effect(
-            exec_envelope("same-key", "first"),
-            returning_executor("first"),
-        )
-        .await
-        .expect("first effect");
-
-    let err = controller
-        .execute_effect(
-            exec_envelope("same-key", "changed"),
-            returning_executor("changed"),
-        )
-        .await
-        .expect_err("same replay key with changed envelope must fail");
-    assert_eq!(err.code, "sqlite_effect_replay_hash_conflict");
+    lash_core::testing::conformance::effect_controller_replay_mismatch_diagnostics(
+        &controller,
+        "sqlite_effect_replay_hash_conflict",
+    )
+    .await;
 }
 
 #[tokio::test]

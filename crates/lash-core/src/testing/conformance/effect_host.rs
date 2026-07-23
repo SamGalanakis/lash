@@ -500,6 +500,54 @@ pub async fn effect_controller_journaled_effect_replay(
     );
 }
 
+/// Assert that a durable effect controller surfaces the same structural replay
+/// mismatch detail as the shared canonical-envelope validator.
+#[cfg(any(test, feature = "testing"))]
+pub async fn effect_controller_replay_mismatch_diagnostics(
+    controller: &dyn RuntimeEffectController,
+    mismatch_code: &str,
+) {
+    let envelope = |duration_ms| {
+        RuntimeEffectEnvelope::new(
+            RuntimeInvocation::effect(
+                RuntimeScope::for_turn("replay-mismatch-session", "replay-mismatch-turn", 0, 0),
+                "replay-mismatch-sleep",
+                RuntimeEffectKind::Sleep,
+                "replay-mismatch-sleep",
+            ),
+            RuntimeEffectCommand::Sleep { duration_ms },
+        )
+    };
+    controller
+        .execute_effect(
+            envelope(0),
+            RuntimeEffectLocalExecutor::testing(|_| async { Ok(RuntimeEffectOutcome::Sleep) }),
+        )
+        .await
+        .expect("record mismatch-vector envelope");
+
+    let error = controller
+        .execute_effect(envelope(1), RuntimeEffectLocalExecutor::unavailable())
+        .await
+        .expect_err("reusing a replay key with a divergent envelope must fail");
+    assert_eq!(error.code, mismatch_code);
+    assert_eq!(
+        error.summary,
+        Some(crate::RuntimeEffectReplayMismatchSummary {
+            divergent_path_count: 1,
+            first_divergent_paths: vec!["command.duration_ms".to_string()],
+        }),
+        "replay mismatch must surface its divergent structural path"
+    );
+    assert!(
+        error
+            .message
+            .contains("divergent_paths=[command.duration_ms]"),
+        "replay mismatch message must surface its divergent structural path: {}",
+        error.message
+    );
+}
+
 async fn effect_host_preserves_scope_metadata(host: Arc<dyn EffectHost>) {
     let scope = ExecutionScope::queue_drain("session-1", "drain-1");
     let scoped = host.scoped(scope.clone()).expect("queue drain scope");

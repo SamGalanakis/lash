@@ -214,6 +214,7 @@ async fn ensure_schema(pool: &PgPool) -> Result<Vec<u8>, StoreError> {
             scope_id TEXT NOT NULL,
             replay_key TEXT NOT NULL,
             envelope_hash TEXT NOT NULL,
+            envelope_json TEXT NOT NULL,
             status TEXT NOT NULL,
             outcome_json TEXT,
             error_json TEXT,

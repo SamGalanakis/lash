@@ -16,11 +16,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lash_core::{
-    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier, EffectHost,
-    ExecutionScope, LeaseTimings, Resolution, ResolveOutcome, RuntimeAwaitEventOptions,
-    RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
-    RuntimeEffectEnvelope, RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError,
-    ScopedEffectController,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, CanonicalRuntimeEffectEnvelope,
+    DurabilityTier, EffectHost, ExecutionScope, LeaseTimings, Resolution, ResolveOutcome,
+    RuntimeAwaitEventOptions, RuntimeEffectCommand, RuntimeEffectController,
+    RuntimeEffectControllerError, RuntimeEffectEnvelope, RuntimeEffectLocalExecutor,
+    RuntimeEffectOutcome, RuntimeError, ScopedEffectController, validate_replayed_effect_envelope,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -79,6 +79,10 @@ struct ClaimedEffect {
 }
 
 enum PreparedEffect {
+    ReplayMismatch {
+        recorded_envelope: Box<CanonicalRuntimeEffectEnvelope>,
+        stored_envelope_hash: String,
+    },
     ReplayOutcome {
         outcome: Box<RuntimeEffectOutcome>,
         due_at_ms: Option<u64>,
@@ -302,6 +306,7 @@ impl SqliteRuntimeEffectController {
     async fn prepare_effect(
         &self,
         envelope: &RuntimeEffectEnvelope,
+        reconstructed_envelope: &CanonicalRuntimeEffectEnvelope,
     ) -> Result<PreparedEffect, RuntimeEffectControllerError> {
         let replay_key = envelope
             .invocation
@@ -313,7 +318,9 @@ impl SqliteRuntimeEffectController {
                 )
             })?
             .to_string();
-        let envelope_hash = envelope.stable_hash()?;
+        let envelope_hash = reconstructed_envelope.hash().to_string();
+        let envelope_json =
+            serde_json::to_string(reconstructed_envelope).map_err(effect_encode_error)?;
         let scope_id = self.scope.id().to_string();
         let now = self.inner.clock.timestamp_ms();
         let lease_token = self.inner.next_lease_token();
@@ -336,7 +343,7 @@ impl SqliteRuntimeEffectController {
             .write(move |tx| {
                 let row = tx
                     .query_row(
-                        "SELECT envelope_hash, status, outcome_json, error_json,
+                        "SELECT envelope_hash, envelope_json, status, outcome_json, error_json,
                                 lease_owner_id, lease_token, lease_expires_at_ms, due_at_ms
                          FROM runtime_effect_replay
                          WHERE scope_id = ?1 AND replay_key = ?2",
@@ -345,10 +352,11 @@ impl SqliteRuntimeEffectController {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, String>(1)?,
-                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, String>(2)?,
                                 row.get::<_, Option<String>>(3)?,
-                                row.get::<_, i64>(6)?,
-                                row.get::<_, Option<i64>>(7)?,
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, i64>(7)?,
+                                row.get::<_, Option<i64>>(8)?,
                             ))
                         },
                     )
@@ -356,6 +364,7 @@ impl SqliteRuntimeEffectController {
 
                 let Some((
                     existing_hash,
+                    existing_envelope_json,
                     status,
                     outcome_json,
                     error_json,
@@ -374,15 +383,16 @@ impl SqliteRuntimeEffectController {
                     let due_at_param = due_at_ms.map(|value| value as i64);
                     tx.execute(
                         "INSERT INTO runtime_effect_replay (
-                            scope_id, replay_key, envelope_hash, status, outcome_json,
+                            scope_id, replay_key, envelope_hash, envelope_json, status, outcome_json,
                             error_json, lease_owner_id, lease_token, lease_expires_at_ms,
                             due_at_ms, created_at_ms, updated_at_ms
                          )
-                         VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, ?9, ?10)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7, ?8, ?9, ?10, ?11)",
                         params![
                             scope_id.as_str(),
                             replay_key.as_str(),
                             envelope_hash.as_str(),
+                            envelope_json.as_str(),
                             STATUS_IN_PROGRESS,
                             owner_id.as_str(),
                             lease_token.as_str(),
@@ -402,12 +412,15 @@ impl SqliteRuntimeEffectController {
                 };
 
                 if existing_hash != envelope_hash {
-                    return Ok(Err(RuntimeEffectControllerError::new(
-                        "sqlite_effect_replay_hash_conflict",
-                        format!(
-                            "runtime effect replay key `{replay_key}` in scope `{scope_id}` was reused with a different envelope hash"
-                        ),
-                    )));
+                    let recorded_envelope: CanonicalRuntimeEffectEnvelope =
+                        match serde_json::from_str(&existing_envelope_json) {
+                            Ok(envelope) => envelope,
+                            Err(err) => return Ok(Err(effect_decode_error(err))),
+                        };
+                    return Ok(Ok(PreparedEffect::ReplayMismatch {
+                        recorded_envelope: Box::new(recorded_envelope),
+                        stored_envelope_hash: existing_hash,
+                    }));
                 }
 
                 let lease_expires_at_ms = lease_expires_row as u64;
@@ -731,8 +744,31 @@ impl RuntimeEffectController for SqliteRuntimeEffectController {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let reconstructed_envelope = envelope.canonical_form()?;
+        let replay_trace = local_executor.replay_validation_trace().cloned();
         loop {
-            match self.prepare_effect(&envelope).await? {
+            match self
+                .prepare_effect(&envelope, &reconstructed_envelope)
+                .await?
+            {
+                PreparedEffect::ReplayMismatch {
+                    recorded_envelope,
+                    stored_envelope_hash,
+                } => {
+                    validate_replayed_effect_envelope(
+                        recorded_envelope.as_ref(),
+                        &reconstructed_envelope,
+                        "sqlite_effect_replay_hash_conflict",
+                        replay_trace.as_ref(),
+                    )?;
+                    return Err(RuntimeEffectControllerError::new(
+                        "runtime_effect_envelope_canonical_hash_invariant",
+                        format!(
+                            "stored envelope_hash {stored_envelope_hash} did not match the persisted canonical envelope hash {}",
+                            recorded_envelope.hash()
+                        ),
+                    ));
+                }
                 PreparedEffect::ReplayOutcome { outcome, due_at_ms } => {
                     sleep_until_due(self.inner.clock.as_ref(), due_at_ms).await;
                     return Ok(*outcome);

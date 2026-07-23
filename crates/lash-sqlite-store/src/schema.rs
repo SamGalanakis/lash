@@ -368,6 +368,7 @@ CREATE TABLE IF NOT EXISTS runtime_effect_replay (
     scope_id             TEXT NOT NULL,
     replay_key           TEXT NOT NULL,
     envelope_hash        TEXT NOT NULL,
+    envelope_json        TEXT NOT NULL,
     status               TEXT NOT NULL,
     outcome_json         TEXT,
     error_json           TEXT,
@@ -412,10 +413,10 @@ CREATE TABLE IF NOT EXISTS await_event_revoked_sessions (
 );
 ";
 
-// FIG-561 adds durable AwaitEvent promises, the store-resident signer, and
-// session revocation tombstones. Effect databases follow the crate's alpha
-// reject-and-recreate convention rather than carrying a migration chain.
-pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 2;
+// FIG-579 persists canonical runtime-effect envelopes for structural replay
+// diagnostics. Effect databases follow the crate's alpha reject-and-recreate
+// convention rather than carrying a migration chain.
+pub(crate) const EFFECT_SCHEMA_VERSION: i32 = 3;
 
 pub(crate) async fn apply_pragmas(
     conn: &SqliteConnection,
