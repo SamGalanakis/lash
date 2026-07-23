@@ -498,20 +498,13 @@ impl HostBridge<'_> {
                 inputs: &request.inputs,
             })
             .map_err(|err| ExecutionHostError::new(err.to_string()))?;
+        let subscription_key =
+            materialized_trigger_subscription_key(request.subscription_key.as_deref())?;
         let source_key = lash_core::default_trigger_source_key(
             &request.source.source_type,
             &request.source.value,
         )
         .map_err(|err| ExecutionHostError::new(err.to_string()))?;
-        let subscription_key = match request.subscription_key.clone() {
-            Some(subscription_key) => subscription_key,
-            None => lash_core::derived_subscription_key(
-                &request.target.process_name,
-                &request.source.source_type,
-                &source_key,
-            )
-            .map_err(|err| ExecutionHostError::new(err.to_string()))?,
-        };
         let target = trigger_target_process_input(&request.target).map_err(|err| {
             ExecutionHostError::new(format!("failed to encode trigger target: {err}"))
         })?;
@@ -1087,6 +1080,16 @@ fn trigger_expected_revision(payload: &Value) -> Result<u64, ExecutionHostError>
         })
 }
 
+fn materialized_trigger_subscription_key(
+    subscription_key: Option<&str>,
+) -> Result<String, ExecutionHostError> {
+    subscription_key.map(ToOwned::to_owned).ok_or_else(|| {
+        ExecutionHostError::new(
+            "linked lashlang trigger registrations must carry a materialized `subscription_key`",
+        )
+    })
+}
+
 fn trigger_target_process_input(
     definition: &lashlang::ProcessDefinitionIdentity,
 ) -> Result<lash_core::ProcessInput, serde_json::Error> {
@@ -1214,4 +1217,20 @@ fn collect_printed_images_inner<'a>(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_registration_rejects_an_unmaterialized_subscription_key() {
+        let error =
+            materialized_trigger_subscription_key(None).expect_err("missing key must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "linked lashlang trigger registrations must carry a materialized `subscription_key`"
+        );
+    }
 }

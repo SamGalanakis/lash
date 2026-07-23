@@ -1444,12 +1444,8 @@ mod tests {
             .expect("execute keyless trigger registration");
             assert!(response.error.is_none(), "{:?}", response.error);
 
-            let source = serde_json::json!({ "expr": "0 8 * * *", "tz": "UTC" });
-            let source_key =
-                lash_core::default_trigger_source_key("timer.Schedule", &source).unwrap();
             let expected_key =
-                lash_core::derived_subscription_key("remember", "timer.Schedule", &source_key)
-                    .unwrap();
+                "derived/v1/5074e10b91f98f93621c4f48666f9f217808ce973aa6212d6f19bd34b15c4df8";
             let (effect_owner_scope, effect_subscription_key) = {
                 let envelopes = controller
                     .envelopes
