@@ -26,6 +26,7 @@ pub use config::{
 };
 pub use driver::CompletionEndpoint;
 pub use factory::{OpenAiCompatibleProviderFactory, OpenAiProviderFactory};
+pub use lash_core::llm::transport::{OPENAI_FILE_MIMES, OPENAI_IMAGE_MIMES};
 pub use reasoning::{
     ReasoningEncodeError, ReasoningWireEncoder, ReasoningWireFormat, ReasoningWireIntent,
 };

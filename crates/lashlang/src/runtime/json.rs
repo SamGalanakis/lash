@@ -312,7 +312,7 @@ pub(crate) fn image_to_json(image: &ImageValue) -> serde_json::Value {
     );
     object.insert(
         "mime".to_string(),
-        serde_json::Value::String(image.mime.clone()),
+        serde_json::Value::String(image.mime.to_string()),
     );
     object.insert(
         "label".to_string(),
@@ -401,7 +401,7 @@ pub(crate) fn image_from_json_map(
     }
     Some(ImageValue {
         id: map.get("id")?.as_str()?.to_string(),
-        mime: map.get("mime")?.as_str()?.to_string(),
+        mime: crate::MediaType::parse(map.get("mime")?.as_str()?).ok()?,
         label: map.get("label")?.as_str()?.to_string(),
         size: map.get("size")?.as_u64()?,
         width: optional_u32_field(map.get("width")?)?,

@@ -1543,7 +1543,7 @@ finish validate(img, Type {
         "img",
         Value::Image(Box::new(ImageValue::new(
             "img-1",
-            "image/png",
+            crate::MediaType::parse("image/png").unwrap(),
             "chart.png",
             1234,
             Some(640),
@@ -1558,7 +1558,7 @@ finish validate(img, Type {
         outcome,
         ExecutionOutcome::Finished(Value::Image(Box::new(ImageValue::new(
             "img-1",
-            "image/png",
+            crate::MediaType::parse("image/png").unwrap(),
             "chart.png",
             1234,
             Some(640),

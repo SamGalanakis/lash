@@ -53,8 +53,8 @@ impl GoogleOAuthProvider {
                 ),
                 source => source.media_type().is_some_and(|mime| {
                     GOOGLE_IMAGE_MIMES.contains(&mime.as_str())
-                        || matches!(mime.family(), "audio" | "text" | "video")
-                        || mime.as_str() == "application/pdf"
+                        || GOOGLE_MEDIA_FAMILIES.contains(&mime.family())
+                        || GOOGLE_FILE_MIMES.contains(&mime.as_str())
                 }),
             };
             if !supported {

@@ -1175,12 +1175,7 @@ fn collect_printed_images_inner<'a>(
                     })?;
                 let reference = AttachmentRef {
                     id: lash_core::AttachmentId::new(image.id.clone()),
-                    media_type: lash_core::MediaType::parse(&image.mime).map_err(|_| {
-                        ExecutionHostError::new(format!(
-                            "image `{}` carries unsupported media type `{}`",
-                            image.id, image.mime
-                        ))
-                    })?,
+                    media_type: image.mime.clone(),
                     byte_len: image.size,
                     type_metadata: Some(lash_core::AttachmentTypeMetadata::image(
                         image.width,

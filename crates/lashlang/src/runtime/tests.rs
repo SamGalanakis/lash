@@ -486,7 +486,7 @@ finish Payload
         "cover",
         Value::Image(Box::new(ImageValue::new(
             "img_1",
-            "image/png",
+            crate::MediaType::parse("image/png").unwrap(),
             "cover",
             42,
             Some(640),
@@ -512,7 +512,7 @@ finish Payload
         restored.globals().get("cover"),
         Some(&Value::Image(Box::new(ImageValue::new(
             "img_1",
-            "image/png",
+            crate::MediaType::parse("image/png").unwrap(),
             "cover",
             42,
             Some(640),

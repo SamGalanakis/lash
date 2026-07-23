@@ -45,6 +45,7 @@ pub use introspection::{
     referenced_module_call_paths,
 };
 pub use json_schema::json_schema_to_type_expr;
+pub use lash_sansio::MediaType;
 pub use lexer::{LexError, Span, Token, TokenKind, lex};
 pub use linker::{
     LashlangAbilities, LashlangHostCatalog, LashlangHostCatalogError, LashlangHostEnvironment,

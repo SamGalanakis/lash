@@ -8,7 +8,8 @@ pub(crate) use serde::Deserialize;
 pub(crate) use serde_json::{Value, json};
 
 pub(crate) use lash_core::llm::transport::{
-    LlmTransportError, ProviderFailureKind, unsupported_attachment_capability,
+    ANTHROPIC_FILE_MIMES, ANTHROPIC_IMAGE_MIMES, LlmTransportError, ProviderFailureKind,
+    known_attachment_acceptors, unsupported_attachment_capability,
 };
 pub(crate) use lash_core::llm::types::{
     AttachmentSource, LlmContentBlock, LlmEventSender, LlmOutputPart, LlmOutputSpec, LlmRequest,
@@ -36,53 +37,3 @@ pub(crate) use lash_llm_transport::{
 
 pub(crate) use crate::config::*;
 pub(crate) use crate::policy::*;
-
-pub(crate) const ANTHROPIC_IMAGE_MIMES: &[&str] =
-    &["image/jpeg", "image/png", "image/gif", "image/webp"];
-
-pub(crate) fn known_attachment_acceptors(source: &AttachmentSource) -> Vec<&'static str> {
-    if let AttachmentSource::ProviderFile { provider_scope, .. } = source {
-        return match provider_scope.provider.to_ascii_lowercase().as_str() {
-            "openai" => vec!["OpenAI Responses"],
-            "anthropic" => vec!["Anthropic Messages"],
-            "google" | "google_oauth" | "gemini" => vec!["Google Gemini"],
-            _ => Vec::new(),
-        };
-    }
-    const OPENAI_FILES: &[&str] = &[
-        "application/pdf",
-        "application/json",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "text/csv",
-        "text/html",
-        "text/markdown",
-        "text/plain",
-    ];
-    let mime = source.media_type().expect("MIME-bearing source").as_str();
-    let borrowed_url = matches!(source, AttachmentSource::ExternalUrl { .. });
-    let mut providers = Vec::new();
-    if ANTHROPIC_IMAGE_MIMES.contains(&mime) || OPENAI_FILES.contains(&mime) {
-        providers.push("OpenAI Responses");
-    }
-    if ANTHROPIC_IMAGE_MIMES.contains(&mime) {
-        providers.push("OpenAI Chat Completions");
-        providers.push("Anthropic Messages");
-    } else if mime == "application/pdf" {
-        providers.push("Anthropic Messages");
-    }
-    if !borrowed_url
-        && (matches!(
-            mime,
-            "image/jpeg" | "image/png" | "image/webp" | "image/heic" | "image/heif"
-        ) || matches!(mime.split_once('/'), Some(("audio" | "text" | "video", _)))
-            || mime == "application/pdf")
-    {
-        providers.push("Google Gemini");
-    }
-    providers
-}
