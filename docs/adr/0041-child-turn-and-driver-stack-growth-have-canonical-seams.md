@@ -7,14 +7,14 @@ depth: ordinary one-level child turns already needed oversized test-thread
 stacks, even though boxing showed that no individual future was exceptionally
 large.
 
-We designate two runtime boundaries as the only intentional stack-growth
-seams. A managed child turn with an owned, shareable effect controller runs in
-its own `tokio::spawn` task, giving every nesting level a fresh default-size
-task stack. Inside a physical turn, `RuntimeTurnDriver::run` is boxed exactly
-once before the event pump. Future growth in child-turn orchestration belongs
-behind the task boundary; future growth in the driver belongs behind that one
-box. Callers must not add opportunistic boxes around whichever future most
-recently exceeded a stack budget.
+We designate owned task boundaries as the intentional stack-growth seams. A
+managed child turn with an owned, shareable effect controller runs in its own
+`tokio::spawn` task. Inside a physical turn, heavy local effects (`LlmCall`,
+`ToolBatch`, `ToolAttempt`, `ExecCode`, and direct LLM calls) also run through
+the runtime task seam. Every recursively re-entrant effect therefore starts
+with a fresh task stack instead of extending the turn driver's poll stack.
+Cheap leaf effects remain inline. Callers must not add opportunistic boxes
+around whichever future most recently exceeded a stack budget.
 
 The child task retains the managed runtime mutex for the whole turn and calls
 `publish_from` while the post-turn state is still guarded. The mutex is the
@@ -31,13 +31,21 @@ a silent or reclassified `JoinError`. Session execution leases, queued-work
 claims, and turn-input claims remain owned and settled by the child runtime
 under the same guarded turn path.
 
-Handler-scoped effect controllers, whose borrow is tied to an engine
-invocation, cannot satisfy Tokio's `'static` spawn contract without replacing
-the engine's journal controller. Those controllers retain the inline path to
-preserve durable replay semantics; the prepare/abort frame split, deferred
-cancellation-message recovery, claim de-duplication, and single driver box
-still reduce that path's stack footprint. Hosts that provide an owned shared
-controller take the canonical child-task boundary.
+Heavy turn effects receive an owned driver snapshot containing cloned/`Arc`
+runtime services, a cloned session view, an owned cancellation token, and an
+owned controller proxy. Effect-local state changes that belong to the turn
+driver (provider binding, stream summaries, and newly claimed checkpoint work)
+are returned through a small update slot after the task joins.
+
+Handler-scoped effect controllers remain on the engine invocation task. An
+owned proxy sends controller operations back to that task, which drives them
+from an explicit heap-owned LIFO stack. This preserves the former depth-first
+journal order without recursively polling heavy effect futures. Local
+executors stay on the spawned effect task: the proxy forwards the controller's
+request to run local work and returns its result. Replay may therefore skip
+local execution exactly as before, and Restate retains the original
+handler-scoped journal controller rather than replacing it with an out-of-band
+controller.
 
 The preparation and plugin-abort preamble also lives in separate async helper
 frames. Its `SessionReadView` and abort-only locals are destroyed before the

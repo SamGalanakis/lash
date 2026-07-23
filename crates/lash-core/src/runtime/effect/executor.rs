@@ -4,14 +4,23 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+mod control;
 mod controller_error;
 mod scoped;
 mod trigger;
 
+pub use control::{
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, BoundaryReason, EffectHost,
+    ExecutionScope, ExternalCompletionError, Resolution, ResolveOutcome, RuntimeEffectController,
+    ScopedEffectController, SegmentProgress,
+};
+pub(crate) use control::{
+    EffectTaskController, RuntimeEffectControllerHandle, drive_effect_controller_task,
+};
 pub use controller_error::RuntimeEffectControllerError;
 pub use trigger::TriggerLocalExecution;
 
@@ -21,7 +30,10 @@ use crate::ProcessRegistry;
 use crate::provider::ProviderHandle;
 use crate::runtime::{RuntimeStreamEvent, RuntimeTurnDriver};
 use crate::sansio::LlmCallError;
-use crate::{PluginError, RuntimeError, RuntimeErrorCode};
+use crate::{PluginError, RuntimeError};
+#[cfg(test)]
+use control::EffectControllerTaskRequest;
+use control::{RemoteLocalExecutionRequest, ScopedEffectControllerInner};
 
 use super::envelope::{
     ProcessCommand, ProcessEffectOutcome, RuntimeDirectLlmOutcome, RuntimeEffectCommand,
@@ -47,518 +59,6 @@ pub struct RuntimeSleepOptions {
 }
 
 use super::await_events::AwaitEventRegistry;
-
-// =============================================================================
-// Effect host + controller trait + scope + error
-// =============================================================================
-
-/// Stable semantic identity for one effectful runtime operation.
-///
-/// The scope is chosen by the host boundary before any nondeterministic work is
-/// planned. It is intentionally generic: Restate, an inline test host, or a
-/// future durable effect host all receive the same Lash scope vocabulary.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExecutionScope {
-    Turn {
-        session_id: String,
-        turn_id: String,
-    },
-    Process {
-        process_id: String,
-    },
-    QueueDrain {
-        session_id: String,
-        drain_id: String,
-    },
-    SessionDelete {
-        session_id: String,
-    },
-    RuntimeOperation {
-        operation_id: String,
-    },
-}
-
-impl ExecutionScope {
-    pub fn turn(session_id: impl Into<String>, turn_id: impl Into<String>) -> Self {
-        Self::Turn {
-            session_id: session_id.into(),
-            turn_id: turn_id.into(),
-        }
-    }
-
-    pub fn process(process_id: impl Into<String>) -> Self {
-        Self::Process {
-            process_id: process_id.into(),
-        }
-    }
-
-    pub fn queue_drain(session_id: impl Into<String>, drain_id: impl Into<String>) -> Self {
-        Self::QueueDrain {
-            session_id: session_id.into(),
-            drain_id: drain_id.into(),
-        }
-    }
-
-    pub fn session_delete(session_id: impl Into<String>) -> Self {
-        Self::SessionDelete {
-            session_id: session_id.into(),
-        }
-    }
-
-    pub fn runtime_operation(operation_id: impl Into<String>) -> Self {
-        Self::RuntimeOperation {
-            operation_id: operation_id.into(),
-        }
-    }
-
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Turn { turn_id, .. } => turn_id,
-            Self::Process { process_id } => process_id,
-            Self::QueueDrain { drain_id, .. } => drain_id,
-            Self::SessionDelete { session_id } => session_id,
-            Self::RuntimeOperation { operation_id } => operation_id,
-        }
-    }
-
-    pub fn session_id(&self) -> Option<&str> {
-        match self {
-            Self::Turn { session_id, .. }
-            | Self::QueueDrain { session_id, .. }
-            | Self::SessionDelete { session_id } => Some(session_id),
-            Self::Process { .. } | Self::RuntimeOperation { .. } => None,
-        }
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        match self {
-            Self::Turn { turn_id, .. } => Some(turn_id),
-            _ => None,
-        }
-    }
-
-    pub fn validates_turn_trace_id(&self) -> bool {
-        matches!(self, Self::Turn { .. })
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), RuntimeError> {
-        let missing = match self {
-            Self::Turn {
-                session_id,
-                turn_id,
-            } => session_id.trim().is_empty() || turn_id.trim().is_empty(),
-            Self::Process { process_id } => process_id.trim().is_empty(),
-            Self::QueueDrain {
-                session_id,
-                drain_id,
-            } => session_id.trim().is_empty() || drain_id.trim().is_empty(),
-            Self::SessionDelete { session_id } => session_id.trim().is_empty(),
-            Self::RuntimeOperation { operation_id } => operation_id.trim().is_empty(),
-        };
-        if missing {
-            return Err(RuntimeError::new(
-                RuntimeErrorCode::MissingExecutionScopeId,
-                "execution scopes require non-empty stable ids",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AwaitEventWaitIdentity {
-    ToolCompletion {
-        tool_call_id: String,
-    },
-    ProcessSignal {
-        process_id: String,
-        signal_name: String,
-        ordinal: u64,
-    },
-    /// Reserved first-writer-wins cancellation-versus-completion gate for a
-    /// foreground turn.
-    TurnCancelGate,
-    /// Reserved terminal publication promise for a foreground turn.
-    TurnTerminal,
-    Custom {
-        key: String,
-    },
-}
-
-impl AwaitEventWaitIdentity {
-    pub fn tool_completion(tool_call_id: impl Into<String>) -> Self {
-        Self::ToolCompletion {
-            tool_call_id: tool_call_id.into(),
-        }
-    }
-
-    pub fn process_signal(
-        process_id: impl Into<String>,
-        signal_name: impl Into<String>,
-        ordinal: u64,
-    ) -> Self {
-        Self::ProcessSignal {
-            process_id: process_id.into(),
-            signal_name: signal_name.into(),
-            ordinal,
-        }
-    }
-
-    pub(super) fn validate(&self) -> Result<(), RuntimeError> {
-        let invalid = match self {
-            Self::ToolCompletion { tool_call_id } => tool_call_id.trim().is_empty(),
-            Self::ProcessSignal {
-                process_id,
-                signal_name,
-                ordinal,
-            } => process_id.trim().is_empty() || signal_name.trim().is_empty() || *ordinal == 0,
-            Self::TurnCancelGate | Self::TurnTerminal => false,
-            Self::Custom { key } => key.trim().is_empty(),
-        };
-        if invalid {
-            return Err(RuntimeError::new(
-                "invalid_await_event_wait_identity",
-                "await-event wait identity requires non-empty stable ids",
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn is_turn_control(&self) -> bool {
-        matches!(self, Self::TurnCancelGate | Self::TurnTerminal)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AwaitEventKey {
-    pub scope: ExecutionScope,
-    pub wait: AwaitEventWaitIdentity,
-    pub key_id: String,
-    pub signature: String,
-}
-
-impl AwaitEventKey {
-    pub fn promise_key(&self) -> String {
-        format!("lash-await-event:{}", self.key_id)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExternalCompletionError {
-    pub code: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw: Option<serde_json::Value>,
-}
-
-impl ExternalCompletionError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            raw: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", content = "payload", rename_all = "snake_case")]
-pub enum Resolution {
-    Ok(serde_json::Value),
-    Err(ExternalCompletionError),
-    Timeout,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ResolveOutcome {
-    Accepted,
-    AlreadyResolved { terminal: Resolution },
-    UnknownOrRevoked,
-}
-
-enum ScopedEffectControllerInner<'run> {
-    Borrowed(&'run dyn RuntimeEffectController),
-    Shared(Arc<dyn RuntimeEffectController>),
-}
-
-impl Clone for ScopedEffectControllerInner<'_> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Borrowed(controller) => Self::Borrowed(*controller),
-            Self::Shared(controller) => Self::Shared(Arc::clone(controller)),
-        }
-    }
-}
-
-/// Scoped low-level controller plus the semantic execution scope it is serving.
-#[derive(Clone)]
-pub struct ScopedEffectController<'run> {
-    controller: ScopedEffectControllerInner<'run>,
-    scope: ExecutionScope,
-}
-
-impl<'run> ScopedEffectController<'run> {
-    pub fn borrowed(
-        controller: &'run dyn RuntimeEffectController,
-        scope: ExecutionScope,
-    ) -> Result<Self, RuntimeError> {
-        scope.validate()?;
-        Ok(Self {
-            controller: ScopedEffectControllerInner::Borrowed(controller),
-            scope,
-        })
-    }
-
-    pub fn shared(
-        controller: Arc<dyn RuntimeEffectController>,
-        scope: ExecutionScope,
-    ) -> Result<Self, RuntimeError> {
-        scope.validate()?;
-        Ok(Self {
-            controller: ScopedEffectControllerInner::Shared(controller),
-            scope,
-        })
-    }
-
-    pub fn controller(&self) -> &dyn RuntimeEffectController {
-        match &self.controller {
-            ScopedEffectControllerInner::Borrowed(controller) => *controller,
-            ScopedEffectControllerInner::Shared(controller) => controller.as_ref(),
-        }
-    }
-
-    pub fn execution_scope(&self) -> &ExecutionScope {
-        &self.scope
-    }
-
-    pub fn scope_id(&self) -> &str {
-        self.scope.id()
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        self.scope.turn_id()
-    }
-}
-
-/// Shared durability and Durable Wait contract for effect boundaries.
-///
-/// Both the deployment-level [`EffectHost`] factory and the per-run
-/// [`RuntimeEffectController`] resolve Durable Waits and describe their
-/// durability; this supertrait is the single declaration of that contract.
-#[async_trait::async_trait]
-pub trait AwaitEventResolver: Send + Sync {
-    fn durability_tier(&self) -> crate::DurabilityTier {
-        crate::DurabilityTier::Inline
-    }
-
-    /// Whether [`ToolContext::completion_key`](crate::ToolContext::completion_key)
-    /// may issue an externally routable key whose correctness lifetime is only
-    /// this process.
-    ///
-    /// Durable substrates permit completion keys by construction. Inline-tier
-    /// hosts must opt in explicitly because a restart strands every issued key.
-    fn allows_process_lifetime_completion_keys(&self) -> bool {
-        self.durability_tier() == crate::DurabilityTier::Durable
-    }
-
-    async fn await_event_key(
-        &self,
-        scope: &ExecutionScope,
-        wait: AwaitEventWaitIdentity,
-    ) -> Result<AwaitEventKey, RuntimeError> {
-        if wait.is_turn_control() {
-            return super::await_events::inline_await_events().key_for(scope, wait);
-        }
-        Err(RuntimeError::new(
-            "await_event_unsupported",
-            "this effect boundary does not support await-event keys",
-        ))
-    }
-
-    async fn resolve_await_event(
-        &self,
-        key: &AwaitEventKey,
-        resolution: Resolution,
-    ) -> Result<ResolveOutcome, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::await_events::inline_await_events().resolve(key, resolution);
-        }
-        Ok(ResolveOutcome::UnknownOrRevoked)
-    }
-
-    /// Read a keyed promise without waiting for or resolving it.
-    ///
-    /// Turn owners use this as a synchronous start gate before beginning a
-    /// new effect. Durable owners must perform that read through their
-    /// handler-scoped, replay-aware controller: its result affects subsequent
-    /// command order and therefore must replay identically after an owner
-    /// crash. An unresolved promise returns `None` and remains open.
-    async fn peek_await_event(
-        &self,
-        key: &AwaitEventKey,
-    ) -> Result<Option<Resolution>, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::await_events::inline_await_events().peek_resolution(key);
-        }
-        Err(RuntimeError::new(
-            "await_event_unsupported",
-            "this effect boundary does not support await-event reads",
-        ))
-    }
-
-    async fn await_await_event(
-        &self,
-        key: &AwaitEventKey,
-        cancel: CancellationToken,
-        deadline: Option<Instant>,
-    ) -> Result<Resolution, RuntimeError> {
-        if key.wait.is_turn_control() {
-            return super::await_events::inline_await_events()
-                .await_resolution(key, cancel, deadline, &crate::SystemClock)
-                .await;
-        }
-        Err(RuntimeError::new(
-            "await_event_unsupported",
-            "this effect boundary does not support await-event waits",
-        ))
-    }
-
-    async fn revoke_await_events_for_session(&self, session_id: &str) -> Result<(), RuntimeError> {
-        super::await_events::inline_await_events().revoke_session(session_id)
-    }
-
-    /// Cancel every *outstanding* durable wait for `session_id` without
-    /// deleting the session: each waiter receives a terminal
-    /// [`Resolution::Cancelled`] instead of hanging, late resolves observe
-    /// that terminal, and waits registered afterwards behave normally — in
-    /// contrast to [`revoke_await_events_for_session`](Self::revoke_await_events_for_session),
-    /// which tombstones the session's waits forever.
-    ///
-    /// The default errors loudly: an effect boundary that tracks durable waits
-    /// must implement this to honor the host lever, and one that cannot must
-    /// not silently claim success.
-    async fn cancel_await_events_for_session(&self, _session_id: &str) -> Result<(), RuntimeError> {
-        Err(RuntimeError::new(
-            "await_event_cancel_unsupported",
-            "this effect boundary does not support cancelling durable waits",
-        ))
-    }
-}
-
-/// Deployment-level factory for scoped effect controllers.
-#[async_trait::async_trait]
-pub trait EffectHost: AwaitEventResolver {
-    fn scoped<'run>(
-        &'run self,
-        scope: ExecutionScope,
-    ) -> Result<ScopedEffectController<'run>, RuntimeError>;
-
-    fn scoped_static(
-        &self,
-        _scope: ExecutionScope,
-    ) -> Result<Option<ScopedEffectController<'static>>, RuntimeError> {
-        Ok(None)
-    }
-}
-
-/// Boundary for nondeterministic runtime work.
-#[async_trait::async_trait]
-pub trait RuntimeEffectController: AwaitEventResolver {
-    /// Advises an engine to end the current in-process execution segment at a
-    /// quiescent point. Engines may decline when live state is not capturable,
-    /// but must make progress before returning another decline. In particular,
-    /// an engine must not repeatedly return the same boundary and unchanged
-    /// durable-wait state in one invocation; a host may bound and retry such a
-    /// non-progressing invocation.
-    fn wants_segment_boundary(&self, _progress: &SegmentProgress) -> Option<BoundaryReason> {
-        None
-    }
-
-    /// Whether this controller can safely accept overlapping `execute_effect`
-    /// calls from one runtime coordinator.
-    ///
-    /// Local and store-backed controllers can usually fan out independent
-    /// effects. Some workflow substrates expose a single ordered journal
-    /// context where native operations must be awaited immediately before the
-    /// next context call is issued. Those controllers should return `false` so
-    /// coordinators serialize child effects while still replaying each child by
-    /// its own stable key.
-    fn supports_concurrent_effects(&self) -> bool {
-        true
-    }
-
-    async fn execute_effect(
-        &self,
-        envelope: RuntimeEffectEnvelope,
-        local_executor: RuntimeEffectLocalExecutor<'_>,
-    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError>;
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SegmentProgress {
-    pub effects_executed: u64,
-    pub journaled_bytes_estimate: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BoundaryReason {
-    JournalBudget,
-    DurationCap,
-}
-
-/// Runtime-internal handle for effect-controller references carried through
-/// per-turn execution contexts.
-#[derive(Clone)]
-pub(crate) enum RuntimeEffectControllerHandle<'run> {
-    Borrowed(ScopedEffectController<'run>),
-    #[cfg(any(test, feature = "testing"))]
-    Shared {
-        controller: Arc<dyn RuntimeEffectController>,
-        scope: ExecutionScope,
-    },
-}
-
-impl<'run> RuntimeEffectControllerHandle<'run> {
-    pub(crate) fn borrowed(scoped: ScopedEffectController<'run>) -> Self {
-        Self::Borrowed(scoped)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn shared(controller: Arc<dyn RuntimeEffectController>) -> Self {
-        Self::Shared {
-            controller,
-            scope: ExecutionScope::runtime_operation("test-runtime-effect-controller"),
-        }
-    }
-
-    pub(crate) fn controller(&self) -> &dyn RuntimeEffectController {
-        match self {
-            Self::Borrowed(scoped) => scoped.controller(),
-            #[cfg(any(test, feature = "testing"))]
-            Self::Shared { controller, .. } => controller.as_ref(),
-        }
-    }
-
-    pub(crate) fn scoped(&self) -> ScopedEffectController<'_> {
-        match self {
-            Self::Borrowed(scoped) => scoped.clone(),
-            #[cfg(any(test, feature = "testing"))]
-            Self::Shared { controller, scope } => {
-                ScopedEffectController::shared(Arc::clone(controller), scope.clone())
-                    .expect("runtime effect controller handle carries a valid scope")
-            }
-        }
-    }
-
-    pub(crate) fn clone_scoped(&self) -> RuntimeEffectControllerHandle<'run> {
-        self.clone()
-    }
-}
 
 // =============================================================================
 // Local executor (per-effect borrowed runner state)
@@ -672,11 +172,21 @@ impl ProcessLocalExecution {
     }
 }
 
-pub(super) struct LocalTurnEffectRunner<'a, 'run> {
-    driver: &'a mut RuntimeTurnDriver<'run>,
-    machine: &'a mut crate::TurnMachine,
+pub(crate) struct TurnEffectStateUpdate {
+    pub(crate) policy: crate::RuntimeSessionPolicy,
+    pub(crate) llm_stream_summaries: HashMap<usize, crate::runtime::LlmStreamSummary>,
+    pub(crate) next_llm_ordinal: usize,
+    pub(crate) pending_queue_claims: Vec<crate::QueuedWorkClaim>,
+    pub(crate) pending_turn_input_claims: Vec<crate::TurnInputClaim>,
+}
+
+pub(super) struct LocalTurnEffectRunner {
+    driver: RuntimeTurnDriver<'static>,
+    protocol_iteration: usize,
+    messages: crate::MessageSequence,
     event_tx: mpsc::Sender<RuntimeStreamEvent>,
     cancellation: CancellationToken,
+    update: Arc<std::sync::Mutex<Option<TurnEffectStateUpdate>>>,
 }
 
 pub(super) struct LocalDirectEffectRunner {
@@ -694,8 +204,16 @@ struct LocalPreparedToolAttemptEffectRunner<'run> {
     tool_context: crate::ToolContext<'run>,
 }
 
+struct RemoteEffectRunner {
+    requests: mpsc::UnboundedSender<RemoteLocalExecutionRequest>,
+}
+
 #[async_trait::async_trait]
 trait RuntimeEffectLocalRunner: Send {
+    fn uses_task_boundary(&self, _command: &RuntimeEffectCommand) -> bool {
+        false
+    }
+
     async fn execute(
         self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
@@ -735,6 +253,7 @@ enum RuntimeEffectLocalExecutorState<'run> {
     Process(ProcessLocalExecution),
     Trigger(TriggerLocalExecution),
     Runner(Box<dyn RuntimeEffectLocalRunner + Send + 'run>),
+    OwnedRunner(Box<dyn RuntimeEffectLocalRunner + Send + 'static>),
 }
 
 /// Scoped local executor provided to a [`RuntimeEffectController`] for one effect.
@@ -745,6 +264,32 @@ enum RuntimeEffectLocalExecutorState<'run> {
 pub struct RuntimeEffectLocalExecutor<'run> {
     state: RuntimeEffectLocalExecutorState<'run>,
     replay_trace: Option<super::RuntimeEffectReplayTrace>,
+}
+
+struct AbortEffectTaskOnDrop {
+    handle: tokio::task::AbortHandle,
+    armed: bool,
+}
+
+impl AbortEffectTaskOnDrop {
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortEffectTaskOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
+    }
 }
 
 impl<'run> RuntimeEffectLocalExecutor<'run> {
@@ -844,15 +389,16 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
-    pub(in crate::runtime) fn turn<'scope>(
-        driver: &'run mut RuntimeTurnDriver<'scope>,
-        machine: &'run mut crate::TurnMachine,
+    pub(in crate::runtime) fn turn(
+        driver: &mut RuntimeTurnDriver<'_>,
+        machine: &crate::TurnMachine,
         event_tx: mpsc::Sender<RuntimeStreamEvent>,
         cancellation: CancellationToken,
-    ) -> Self
-    where
-        'scope: 'run,
-    {
+        scoped_effect_controller: ScopedEffectController<'static>,
+    ) -> (
+        RuntimeEffectLocalExecutor<'static>,
+        Arc<std::sync::Mutex<Option<TurnEffectStateUpdate>>>,
+    ) {
         let replay_trace = super::RuntimeEffectReplayTrace::gated(
             driver.host.core.tracing.trace_level,
             driver.host.core.tracing.trace_sink.as_ref(),
@@ -860,15 +406,51 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
             driver.trace_context(machine.protocol_iteration()),
             Arc::clone(&driver.host.core.clock),
         );
-        Self {
-            state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalTurnEffectRunner {
-                driver,
-                machine,
-                event_tx,
-                cancellation,
-            })),
-            replay_trace,
-        }
+        let update = Arc::new(std::sync::Mutex::new(None));
+        let owned_driver = RuntimeTurnDriver {
+            session: driver.session.clone_for_effect(),
+            policy: driver.policy.clone(),
+            host: driver.host.clone(),
+            scoped_effect_controller,
+            session_id: driver.session_id.clone(),
+            turn_id: driver.turn_id.clone(),
+            turn_index: driver.turn_index,
+            turn_pipeline: crate::runtime::TurnBoundary::from_state_with_clock(
+                driver.turn_pipeline.state().clone(),
+                Arc::clone(&driver.host.core.clock),
+            )
+            .with_session_execution_lease(driver.session_execution_lease.clone()),
+            llm_stream_summaries: driver.llm_stream_summaries.clone(),
+            llm_calls: Vec::new(),
+            next_llm_ordinal: driver.next_llm_ordinal,
+            session_services: Arc::clone(&driver.session_services),
+            protocol_turn_options: driver.protocol_turn_options.clone(),
+            protocol_extension: driver.protocol_extension.clone(),
+            turn_context: driver.turn_context.clone(),
+            turn_causes: driver.turn_causes.clone(),
+            pending_queue_claims: driver.pending_queue_claims.clone(),
+            pending_turn_input_claims: driver.pending_turn_input_claims.clone(),
+            checkpoint_messages: driver.checkpoint_messages.clone(),
+            session_execution_lease: driver.session_execution_lease.clone(),
+            runtime_lease_owner: driver.runtime_lease_owner.clone(),
+            turn_phase_probe: driver.turn_phase_probe.clone(),
+        };
+        (
+            RuntimeEffectLocalExecutor {
+                state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                    LocalTurnEffectRunner {
+                        driver: owned_driver,
+                        protocol_iteration: machine.protocol_iteration(),
+                        messages: machine.message_sequence(),
+                        event_tx,
+                        cancellation,
+                        update: Arc::clone(&update),
+                    },
+                )),
+                replay_trace,
+            },
+            update,
+        )
     }
 
     pub(in crate::runtime) fn direct(
@@ -877,10 +459,12 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         replay_trace: Option<super::RuntimeEffectReplayTrace>,
     ) -> Self {
         Self {
-            state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalDirectEffectRunner {
-                provider,
-                attachment_store,
-            })),
+            state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                LocalDirectEffectRunner {
+                    provider,
+                    attachment_store,
+                },
+            )),
             replay_trace,
         }
     }
@@ -890,6 +474,17 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         child_trace_hooks: HashMap<String, crate::ToolChildExecutionTraceHook>,
     ) -> Self {
         let replay_trace = context.replay_validation_trace();
+        if let Some(context) = context.to_static() {
+            return Self {
+                state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                    LocalToolBatchEffectRunner {
+                        context,
+                        child_trace_hooks,
+                    },
+                )),
+                replay_trace,
+            };
+        }
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(LocalToolBatchEffectRunner {
                 context,
@@ -904,6 +499,19 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         tool_context: crate::ToolContext<'run>,
     ) -> Self {
         let replay_trace = tool_context.replay_validation_trace();
+        if let (Some(dispatch), Some(tool_context)) =
+            (dispatch.to_static(), tool_context.to_static())
+        {
+            return Self {
+                state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                    LocalPreparedToolAttemptEffectRunner {
+                        dispatch: Arc::new(dispatch),
+                        tool_context,
+                    },
+                )),
+                replay_trace,
+            };
+        }
         Self {
             state: RuntimeEffectLocalExecutorState::Runner(Box::new(
                 LocalPreparedToolAttemptEffectRunner {
@@ -925,6 +533,25 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
         match self.state {
             RuntimeEffectLocalExecutorState::Runner(runner) => runner.execute(envelope).await,
+            RuntimeEffectLocalExecutorState::OwnedRunner(runner) => {
+                if !runner.uses_task_boundary(&envelope.command) {
+                    return runner.execute(envelope).await;
+                }
+                let task = crate::task::spawn(
+                    crate::runtime::process_worker::inherit_process_execution_permit(
+                        runner.execute(envelope),
+                    ),
+                );
+                let mut abort = AbortEffectTaskOnDrop::new(task.abort_handle());
+                let result = task.await.map_err(|err| {
+                    RuntimeEffectControllerError::new(
+                        "runtime_effect_task_join",
+                        format!("spawned local effect task failed: {err}"),
+                    )
+                })?;
+                abort.disarm();
+                result
+            }
             RuntimeEffectLocalExecutorState::SleepOnly {
                 cancellation,
                 clock,
@@ -973,6 +600,122 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
         }
     }
 
+    fn into_remote_execution(
+        self,
+    ) -> (
+        RuntimeEffectLocalExecutor<'static>,
+        Option<(
+            RuntimeEffectLocalExecutor<'run>,
+            mpsc::UnboundedReceiver<RemoteLocalExecutionRequest>,
+        )>,
+    ) {
+        let RuntimeEffectLocalExecutor {
+            state,
+            replay_trace,
+        } = self;
+        match state {
+            RuntimeEffectLocalExecutorState::Runner(runner) => {
+                let (requests, request_rx) = mpsc::unbounded_channel();
+                (
+                    RuntimeEffectLocalExecutor {
+                        state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                            RemoteEffectRunner { requests },
+                        )),
+                        replay_trace: replay_trace.clone(),
+                    },
+                    Some((
+                        RuntimeEffectLocalExecutor {
+                            state: RuntimeEffectLocalExecutorState::Runner(runner),
+                            replay_trace,
+                        },
+                        request_rx,
+                    )),
+                )
+            }
+            RuntimeEffectLocalExecutorState::OwnedRunner(runner) => {
+                let (requests, request_rx) = mpsc::unbounded_channel();
+                (
+                    RuntimeEffectLocalExecutor {
+                        state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(
+                            RemoteEffectRunner { requests },
+                        )),
+                        replay_trace: replay_trace.clone(),
+                    },
+                    Some((
+                        RuntimeEffectLocalExecutor {
+                            state: RuntimeEffectLocalExecutorState::OwnedRunner(runner),
+                            replay_trace,
+                        },
+                        request_rx,
+                    )),
+                )
+            }
+            state => (
+                RuntimeEffectLocalExecutor {
+                    state: match state {
+                        RuntimeEffectLocalExecutorState::Unavailable => {
+                            RuntimeEffectLocalExecutorState::Unavailable
+                        }
+                        RuntimeEffectLocalExecutorState::SleepOnly {
+                            cancellation,
+                            clock,
+                            observe_turn_cancel,
+                        } => RuntimeEffectLocalExecutorState::SleepOnly {
+                            cancellation,
+                            clock,
+                            observe_turn_cancel,
+                        },
+                        RuntimeEffectLocalExecutorState::ExternalWaitOptions {
+                            cancellation,
+                            deadline,
+                            clock,
+                            observe_turn_cancel,
+                        } => RuntimeEffectLocalExecutorState::ExternalWaitOptions {
+                            cancellation,
+                            deadline,
+                            clock,
+                            observe_turn_cancel,
+                        },
+                        RuntimeEffectLocalExecutorState::Process(execution) => {
+                            RuntimeEffectLocalExecutorState::Process(execution)
+                        }
+                        RuntimeEffectLocalExecutorState::Trigger(execution) => {
+                            RuntimeEffectLocalExecutorState::Trigger(execution)
+                        }
+                        RuntimeEffectLocalExecutorState::Runner(_)
+                        | RuntimeEffectLocalExecutorState::OwnedRunner(_) => {
+                            unreachable!("runner states are handled above")
+                        }
+                    },
+                    replay_trace,
+                },
+                None,
+            ),
+        }
+    }
+
+    async fn execute_forwarded(
+        self,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let RuntimeEffectEnvelope {
+            invocation,
+            command,
+        } = envelope;
+        match command {
+            RuntimeEffectCommand::Trigger { command } => {
+                self.execute_trigger(invocation, *command).await
+            }
+            command => {
+                self.execute(RuntimeEffectEnvelope {
+                    invocation,
+                    command,
+                })
+                .await
+            }
+        }
+    }
+
     pub fn into_trigger(self) -> Result<TriggerLocalExecution, RuntimeEffectControllerError> {
         match self.state {
             RuntimeEffectLocalExecutorState::Trigger(execution) => Ok(execution),
@@ -1004,7 +747,8 @@ impl<'run> RuntimeEffectLocalExecutor<'run> {
                     result: Box::new(result),
                 })
             }
-            RuntimeEffectLocalExecutorState::Runner(runner) => {
+            RuntimeEffectLocalExecutorState::Runner(runner)
+            | RuntimeEffectLocalExecutorState::OwnedRunner(runner) => {
                 runner
                     .execute(RuntimeEffectEnvelope::new(
                         invocation,
@@ -1076,6 +820,13 @@ impl RuntimeEffectLocalRunner for TestingRuntimeEffectLocalRunner<'_> {
 
 #[async_trait::async_trait]
 impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
+    fn uses_task_boundary(&self, command: &RuntimeEffectCommand) -> bool {
+        matches!(
+            command,
+            RuntimeEffectCommand::ToolBatch { .. } | RuntimeEffectCommand::ToolAttempt { .. }
+        )
+    }
+
     async fn execute(
         self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
@@ -1129,6 +880,10 @@ impl RuntimeEffectLocalRunner for LocalToolBatchEffectRunner<'_> {
 
 #[async_trait::async_trait]
 impl RuntimeEffectLocalRunner for LocalPreparedToolAttemptEffectRunner<'_> {
+    fn uses_task_boundary(&self, command: &RuntimeEffectCommand) -> bool {
+        matches!(command, RuntimeEffectCommand::ToolAttempt { .. })
+    }
+
     async fn execute(
         self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
@@ -1169,20 +924,28 @@ impl RuntimeEffectLocalRunner for LocalPreparedToolAttemptEffectRunner<'_> {
 }
 
 #[async_trait::async_trait]
-impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
+impl RuntimeEffectLocalRunner for LocalTurnEffectRunner {
+    fn uses_task_boundary(&self, command: &RuntimeEffectCommand) -> bool {
+        matches!(
+            command,
+            RuntimeEffectCommand::LlmCall { .. }
+                | RuntimeEffectCommand::ToolBatch { .. }
+                | RuntimeEffectCommand::ExecCode { .. }
+        )
+    }
+
     async fn execute(
         self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
-        let runner = *self;
-        match envelope.command {
+        let mut runner = *self;
+        let result = match envelope.command {
             RuntimeEffectCommand::LlmCall { request } => {
-                let protocol_iteration = runner.machine.protocol_iteration();
                 let (result, text_streamed, call_record) = runner
                     .driver
                     .run_llm_call(
                         Arc::new((*request).into_request(None, None)),
-                        protocol_iteration,
+                        runner.protocol_iteration,
                         envelope.invocation,
                         &runner.event_tx,
                         &runner.cancellation,
@@ -1194,24 +957,20 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     call_record,
                 })
             }
-            RuntimeEffectCommand::ToolBatch { batch } => {
-                let outcome = runner
-                    .driver
-                    .run_tool_batch(
-                        batch,
-                        envelope.invocation,
-                        &runner.event_tx,
-                        &runner.cancellation,
-                    )
-                    .await?;
-                Ok(RuntimeEffectOutcome::ToolBatch {
+            RuntimeEffectCommand::ToolBatch { batch } => runner
+                .driver
+                .run_tool_batch(
+                    batch,
+                    envelope.invocation,
+                    &runner.event_tx,
+                    &runner.cancellation,
+                )
+                .await
+                .map(|outcome| RuntimeEffectOutcome::ToolBatch {
                     launches: outcome.launches,
                     triggers: outcome.triggers,
-                })
-            }
+                }),
             RuntimeEffectCommand::ExecCode { language, code } => {
-                let protocol_iteration = runner.machine.protocol_iteration();
-                let messages = runner.machine.message_sequence();
                 Ok(RuntimeEffectOutcome::ExecCode {
                     result: Box::new(
                         runner
@@ -1219,8 +978,8 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                             .run_exec_code(
                                 language,
                                 &code,
-                                messages,
-                                protocol_iteration,
+                                runner.messages.clone(),
+                                runner.protocol_iteration,
                                 envelope.invocation,
                                 &runner.event_tx,
                                 &runner.cancellation,
@@ -1233,7 +992,12 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                 Ok(RuntimeEffectOutcome::Checkpoint {
                     result: runner
                         .driver
-                        .run_checkpoint(runner.machine, checkpoint, &runner.event_tx)
+                        .run_checkpoint(
+                            runner.messages.clone(),
+                            runner.protocol_iteration,
+                            checkpoint,
+                            &runner.event_tx,
+                        )
                         .await
                         .map_err(RuntimeEffectControllerError::from),
                 })
@@ -1243,7 +1007,7 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
             } => Ok(RuntimeEffectOutcome::SyncExecutionEnvironment {
                 result: runner
                     .driver
-                    .refresh_execution_environment(runner.machine, update_machine_config)
+                    .refresh_execution_environment(runner.messages.clone(), update_machine_config)
                     .await
                     .map_err(|err| err.to_string()),
             }),
@@ -1263,12 +1027,25 @@ impl RuntimeEffectLocalRunner for LocalTurnEffectRunner<'_, '_> {
                     command.kind().as_str()
                 ),
             )),
-        }
+        };
+        *runner.update.lock().expect("turn effect state update lock") =
+            Some(TurnEffectStateUpdate {
+                policy: runner.driver.policy,
+                llm_stream_summaries: runner.driver.llm_stream_summaries,
+                next_llm_ordinal: runner.driver.next_llm_ordinal,
+                pending_queue_claims: runner.driver.pending_queue_claims,
+                pending_turn_input_claims: runner.driver.pending_turn_input_claims,
+            });
+        result
     }
 }
 
 #[async_trait::async_trait]
 impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
+    fn uses_task_boundary(&self, command: &RuntimeEffectCommand) -> bool {
+        matches!(command, RuntimeEffectCommand::Direct { .. })
+    }
+
     async fn execute(
         mut self: Box<Self>,
         envelope: RuntimeEffectEnvelope,
@@ -1303,6 +1080,30 @@ impl RuntimeEffectLocalRunner for LocalDirectEffectRunner {
                 ),
             )),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeEffectLocalRunner for RemoteEffectRunner {
+    async fn execute(
+        self: Box<Self>,
+        envelope: RuntimeEffectEnvelope,
+    ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let (response, response_rx) = oneshot::channel();
+        self.requests
+            .send(RemoteLocalExecutionRequest { envelope, response })
+            .map_err(|_| {
+                RuntimeEffectControllerError::new(
+                    "runtime_effect_local_task_closed",
+                    "spawned effect local executor is no longer running",
+                )
+            })?;
+        response_rx.await.map_err(|_| {
+            RuntimeEffectControllerError::new(
+                "runtime_effect_local_task_closed",
+                "spawned effect local executor response was dropped",
+            )
+        })?
     }
 }
 
@@ -1562,5 +1363,109 @@ impl InlineRuntimeEffectController {
 impl std::fmt::Debug for InlineRuntimeEffectController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InlineRuntimeEffectController").finish()
+    }
+}
+
+#[cfg(test)]
+mod task_boundary_tests {
+    use super::*;
+    use crate::RuntimeInvocation;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TaskIdentityRunner {
+        observed: oneshot::Sender<tokio::task::Id>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeEffectLocalRunner for TaskIdentityRunner {
+        fn uses_task_boundary(&self, command: &RuntimeEffectCommand) -> bool {
+            matches!(command, RuntimeEffectCommand::ExecCode { .. })
+        }
+
+        async fn execute(
+            self: Box<Self>,
+            _envelope: RuntimeEffectEnvelope,
+        ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+            let _ = self.observed.send(tokio::task::id());
+            Ok(RuntimeEffectOutcome::Sleep)
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_heavy_effect_runs_on_a_fresh_task() {
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let executor = RuntimeEffectLocalExecutor {
+            state: RuntimeEffectLocalExecutorState::OwnedRunner(Box::new(TaskIdentityRunner {
+                observed: observed_tx,
+            })),
+            replay_trace: None,
+        };
+        let parent = crate::task::spawn(async move {
+            let parent_id = tokio::task::id();
+            let outcome = executor
+                .execute(RuntimeEffectEnvelope::new(
+                    RuntimeInvocation::effect(
+                        crate::RuntimeScope::new("task-boundary"),
+                        "exec",
+                        RuntimeEffectKind::ExecCode,
+                        "task-boundary:exec",
+                    ),
+                    RuntimeEffectCommand::ExecCode {
+                        language: "text".to_string(),
+                        code: String::new(),
+                    },
+                ))
+                .await
+                .expect("spawned effect");
+            assert!(matches!(outcome, RuntimeEffectOutcome::Sleep));
+            parent_id
+        });
+        let child_id = observed_rx.await.expect("effect task id");
+        let parent_id = parent.await.expect("parent task");
+        assert_ne!(child_id, parent_id);
+    }
+
+    #[tokio::test]
+    async fn replayed_effect_may_skip_remote_local_execution() {
+        let executed = Arc::new(AtomicBool::new(false));
+        let local_executed = Arc::clone(&executed);
+        let local_executor = RuntimeEffectLocalExecutor::testing(move |_| async move {
+            local_executed.store(true, Ordering::SeqCst);
+            Ok(RuntimeEffectOutcome::Sleep)
+        });
+        let controller = InlineRuntimeEffectController::default();
+        let (proxy, mut requests) = EffectTaskController::scoped(
+            &controller,
+            ExecutionScope::runtime_operation("replay-skips-local"),
+        )
+        .expect("task controller");
+        let envelope = RuntimeEffectEnvelope::new(
+            RuntimeInvocation::effect(
+                crate::RuntimeScope::new("replay-skips-local"),
+                "sleep",
+                RuntimeEffectKind::Sleep,
+                "replay-skips-local:sleep",
+            ),
+            RuntimeEffectCommand::Sleep { duration_ms: 0 },
+        );
+        let invoke = proxy.controller().execute_effect(envelope, local_executor);
+        let service = async {
+            let Some(EffectControllerTaskRequest::Execute {
+                local_executor,
+                response,
+                ..
+            }) = requests.recv().await
+            else {
+                panic!("expected proxied execute request");
+            };
+            drop(local_executor);
+            tokio::task::yield_now().await;
+            response
+                .send(Ok(RuntimeEffectOutcome::Sleep))
+                .expect("proxy response receiver");
+        };
+        let (outcome, ()) = tokio::join!(invoke, service);
+        assert!(matches!(outcome, Ok(RuntimeEffectOutcome::Sleep)));
+        assert!(!executed.load(Ordering::SeqCst));
     }
 }

@@ -107,7 +107,7 @@ pub struct Session {
     tool_registry: Arc<crate::ToolRegistry>,
     context_prompt_contributions: Vec<PromptContribution>,
     message_tx: Option<UnboundedSender<SandboxMessage>>,
-    tool_catalog_cache: std::sync::Mutex<Vec<(ToolCatalogCacheKey, ToolCatalogHandle)>>,
+    tool_catalog_cache: Arc<std::sync::Mutex<Vec<(ToolCatalogCacheKey, ToolCatalogHandle)>>>,
     /// Memoizes the rendered system prompt across turns. Most consecutive
     /// turns reuse the same template + context overlay, so the cache hits
     /// and we skip the section/Vec-join work in
@@ -127,7 +127,7 @@ impl Session {
             tool_registry,
             context_prompt_contributions: Vec::new(),
             message_tx: None,
-            tool_catalog_cache: std::sync::Mutex::new(Vec::new()),
+            tool_catalog_cache: Arc::new(std::sync::Mutex::new(Vec::new())),
             prompt_cache: Arc::new(lash_sansio::PromptCache::new()),
         };
 
@@ -140,6 +140,21 @@ impl Session {
             .await?;
 
         Ok(session)
+    }
+
+    pub(crate) fn clone_for_effect(&self) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            services: self.services.clone(),
+            include_base_tools: self.include_base_tools,
+            context_overlay_revision: self.context_overlay_revision,
+            context_tools: self.context_tools.clone(),
+            tool_registry: Arc::clone(&self.tool_registry),
+            context_prompt_contributions: self.context_prompt_contributions.clone(),
+            message_tx: self.message_tx.clone(),
+            tool_catalog_cache: Arc::clone(&self.tool_catalog_cache),
+            prompt_cache: Arc::clone(&self.prompt_cache),
+        }
     }
 
     pub fn session_id(&self) -> &str {

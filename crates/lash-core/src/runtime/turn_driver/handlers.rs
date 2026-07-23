@@ -133,10 +133,9 @@ impl RuntimeTurnDriver<'_> {
         // produces exactly one Started + one Completed pair. See
         // `RuntimeExecutionContext::emit_tool_call_started_trace` /
         // `emit_tool_call_completed_trace`.
-        let results = match Box::pin(
-            self.invoke_turn_tool_calls_effect(machine, id, calls, event_tx, cancel),
-        )
-        .await
+        let results = match self
+            .invoke_turn_tool_calls_effect(machine, id, calls, event_tx, cancel)
+            .await
         {
             Ok(results) => results,
             Err(err) => {

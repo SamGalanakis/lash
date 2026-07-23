@@ -95,7 +95,7 @@ pub(super) async fn dispatch_prepared_tool_attempt_launch_with_execution_context
     let tool_start = context.clock.now();
     let tool_context = tool_context.with_prepared_payload(prepared.prepared_payload.clone());
     let completion_context = tool_context.clone();
-    let result = Box::pin(execute_tool_attempt(
+    let result = execute_tool_attempt(
         context,
         &manifest,
         &prepared,
@@ -103,7 +103,7 @@ pub(super) async fn dispatch_prepared_tool_attempt_launch_with_execution_context
         tool_context,
         attempt,
         max_attempts,
-    ))
+    )
     .await;
     let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
     let result = match result {
@@ -190,7 +190,7 @@ pub(super) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution
         .with_prepared_payload(prepared.prepared_payload.clone())
         .with_tool_execution_binding(grant.execution_binding.clone());
     let completion_context = tool_context.clone();
-    let result = Box::pin(execute_granted_tool_attempt(
+    let result = execute_granted_tool_attempt(
         context,
         grant,
         &prepared,
@@ -198,7 +198,7 @@ pub(super) async fn dispatch_granted_prepared_tool_attempt_launch_with_execution
         tool_context,
         attempt,
         max_attempts,
-    ))
+    )
     .await;
     let duration_ms = context.clock.now().duration_since(tool_start).as_millis() as u64;
     let result = match result {
@@ -263,24 +263,28 @@ pub(crate) async fn execute_prepared_tool_attempt_effect<'run>(
 ) -> Result<crate::ToolAttemptEffectOutcome, crate::RuntimeEffectControllerError> {
     let call_id = prepared.call_id.clone();
     let launch = if let Some(grant) = execution_grant.as_ref() {
-        dispatch_granted_prepared_tool_attempt_launch_with_execution_context(
-            context,
-            grant,
-            prepared,
-            attempt,
-            max_attempts,
-            None,
-            tool_context,
+        Box::pin(
+            dispatch_granted_prepared_tool_attempt_launch_with_execution_context(
+                context,
+                grant,
+                prepared,
+                attempt,
+                max_attempts,
+                None,
+                tool_context,
+            ),
         )
         .await
     } else {
-        dispatch_prepared_tool_attempt_launch_with_execution_context(
-            context,
-            prepared,
-            attempt,
-            max_attempts,
-            None,
-            tool_context,
+        Box::pin(
+            dispatch_prepared_tool_attempt_launch_with_execution_context(
+                context,
+                prepared,
+                attempt,
+                max_attempts,
+                None,
+                tool_context,
+            ),
         )
         .await
     };

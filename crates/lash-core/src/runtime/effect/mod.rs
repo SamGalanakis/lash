@@ -27,7 +27,10 @@ pub use validation::{
     validate_replayed_effect_envelope,
 };
 
-pub(crate) use executor::{ProcessRunner, RuntimeEffectControllerHandle};
+pub(crate) use executor::{
+    EffectTaskController, ProcessRunner, RuntimeEffectControllerHandle, TurnEffectStateUpdate,
+    drive_effect_controller_task,
+};
 pub(crate) use outcome::{
     LlmTraceFailure, apply_direct_outcome, emit_llm_trace_completed, emit_llm_trace_failed,
     emit_llm_trace_started, token_usage_from_llm,

@@ -314,6 +314,42 @@ impl<'run> ToolContext<'run> {
             .and_then(crate::RuntimeExecutionContext::replay_validation_trace)
     }
 
+    pub(crate) fn to_static(&self) -> Option<ToolContext<'static>> {
+        Some(ToolContext {
+            session_id: self.session_id.clone(),
+            agent_frame_id: self.agent_frame_id.clone(),
+            sessions: Arc::clone(&self.sessions),
+            session_lifecycle: Arc::clone(&self.session_lifecycle),
+            processes: Arc::clone(&self.processes),
+            process_cancel_ability: Arc::clone(&self.process_cancel_ability),
+            effect_controller: self.effect_controller.to_static()?,
+            runtime_dispatch: match self.runtime_dispatch.as_ref() {
+                Some(dispatch) => Some(Arc::new(dispatch.to_static()?)),
+                None => None,
+            },
+            runtime_execution_context: match self.runtime_execution_context.as_ref() {
+                Some(context) => Some(context.to_static()?),
+                None => None,
+            },
+            cancellation_token: self.cancellation_token.clone(),
+            async_process_id: self.async_process_id.clone(),
+            runtime_process_id: self.runtime_process_id.clone(),
+            process_events: self.process_events.clone(),
+            attachment_store: Arc::clone(&self.attachment_store),
+            direct_completions: self.direct_completions.to_static()?,
+            prepared_payload: self.prepared_payload.clone(),
+            tool_execution_binding: self.tool_execution_binding.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            attempt_number: self.attempt_number,
+            max_attempts: self.max_attempts,
+            replay_key: self.replay_key.clone(),
+            completion: self.completion.clone(),
+            parent_invocation: self.parent_invocation.clone(),
+            execution_env_spec: self.execution_env_spec.clone(),
+            child_execution_trace_hook: self.child_execution_trace_hook.clone(),
+        })
+    }
+
     #[cfg(any(test, feature = "testing"))]
     #[expect(
         clippy::too_many_arguments,

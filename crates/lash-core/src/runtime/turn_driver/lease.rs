@@ -26,16 +26,59 @@ impl<'run> RuntimeTurnDriver<'run> {
         decode: impl FnOnce(RuntimeEffectOutcome) -> Result<T, RuntimeEffectControllerError>,
     ) -> Result<T, RuntimeEffectControllerError> {
         let scoped_effect_controller = self.scoped_effect_controller.clone();
-        let local_executor = crate::RuntimeEffectLocalExecutor::turn(
-            self,
-            machine,
-            event_tx.clone(),
-            cancel.clone(),
-        );
-        let outcome = scoped_effect_controller
-            .controller()
-            .execute_effect(envelope, local_executor)
-            .await?;
+        let outcome = if let Some(task_controller) = scoped_effect_controller.to_static() {
+            let (local_executor, update) = crate::RuntimeEffectLocalExecutor::turn(
+                self,
+                machine,
+                event_tx.clone(),
+                cancel.clone(),
+                task_controller,
+            );
+            let outcome = scoped_effect_controller
+                .controller()
+                .execute_effect(envelope, local_executor)
+                .await;
+            self.apply_turn_effect_update(&update);
+            outcome
+        } else {
+            let (task_controller, task_requests) =
+                crate::runtime::effect::EffectTaskController::scoped(
+                    scoped_effect_controller.controller(),
+                    scoped_effect_controller.execution_scope().clone(),
+                )
+                .map_err(RuntimeEffectControllerError::from)?;
+            let (local_executor, update) = crate::RuntimeEffectLocalExecutor::turn(
+                self,
+                machine,
+                event_tx.clone(),
+                cancel.clone(),
+                task_controller,
+            );
+            let outcome = crate::runtime::effect::drive_effect_controller_task(
+                scoped_effect_controller.controller(),
+                envelope,
+                local_executor,
+                task_requests,
+            )
+            .await;
+            self.apply_turn_effect_update(&update);
+            outcome
+        };
+        let outcome = outcome?;
         decode(outcome)
+    }
+
+    fn apply_turn_effect_update(
+        &mut self,
+        update: &std::sync::Mutex<Option<crate::runtime::effect::TurnEffectStateUpdate>>,
+    ) {
+        let update = update.lock().expect("turn effect state update lock").take();
+        if let Some(update) = update {
+            self.policy = update.policy;
+            self.llm_stream_summaries = update.llm_stream_summaries;
+            self.next_llm_ordinal = update.next_llm_ordinal;
+            self.pending_queue_claims = update.pending_queue_claims;
+            self.pending_turn_input_claims = update.pending_turn_input_claims;
+        }
     }
 }
