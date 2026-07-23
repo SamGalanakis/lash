@@ -11,7 +11,8 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, EffectHost, ExecutionScope, ProcessExecutionEnvStore, ProcessRegistry,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier, EffectHost,
+    ExecutionScope, ProcessExecutionEnvStore, ProcessRegistry, Resolution, ResolveOutcome,
     RuntimeEffectCommand, RuntimeEffectController, RuntimeEffectControllerError,
     RuntimeEffectEnvelope, RuntimeEffectKind, RuntimeEffectLocalExecutor, RuntimeEffectOutcome,
     RuntimeInvocation, RuntimePersistence, SessionStoreFactory, TriggerStore,
@@ -483,6 +484,145 @@ async fn sqlite_effect_host_satisfies_scope_conformance() {
         })) as Arc<dyn EffectHost>
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_effect_host_satisfies_cold_instance_await_event_conformance() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cold-await-event.db");
+    lash_core::testing::conformance::effect_host_await_events_cold_instance(|| {
+        let path = path.clone();
+        Arc::new(sync_await(async move {
+            SqliteEffectHost::open(&path)
+                .await
+                .expect("cold SQLite effect host")
+        })) as Arc<dyn EffectHost>
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_await_event_key_mint_is_pure_and_store_secret_is_stable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pure-await-event-key.db");
+    let scope = ExecutionScope::turn("pure-key-session", "pure-key-turn");
+    let wait = AwaitEventWaitIdentity::tool_completion("pure-key-call");
+
+    let (first, second) = tokio::join!(
+        async {
+            SqliteEffectHost::open(&path)
+                .await
+                .expect("first concurrent host")
+                .await_event_key(&scope, wait.clone())
+                .await
+                .expect("first concurrent key")
+        },
+        async {
+            SqliteEffectHost::open(&path)
+                .await
+                .expect("second concurrent host")
+                .await_event_key(&scope, wait.clone())
+                .await
+                .expect("second concurrent key")
+        },
+    );
+    assert_eq!(
+        first, second,
+        "concurrent openers must read one store secret"
+    );
+
+    let connection = rusqlite::Connection::open(&path).expect("open raw effect database");
+    let wait_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM await_event_waits", [], |row| {
+            row.get(0)
+        })
+        .expect("count await-event waits");
+    assert_eq!(wait_count, 0, "key mint must not register a promise row");
+    let secret_shape: (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), length(MAX(signing_secret)) FROM await_event_meta",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("inspect await-event signer");
+    assert_eq!(secret_shape, (1, 32));
+}
+
+#[tokio::test]
+async fn sqlite_effect_host_satisfies_cold_process_await_event_conformance() {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use tokio::process::Command;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cold-process-await-event.db");
+    for identity in ["tool_completion", "turn_cancel_gate"] {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sqlite-await-event-helper"))
+            .arg(&path)
+            .arg(identity)
+            .arg(&nonce)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn cold-process helper for {identity}: {error}"));
+        let stdout = child.stdout.take().expect("helper stdout pipe");
+        let mut lines = BufReader::new(stdout).lines();
+        let encoded_key =
+            tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+                .await
+                .unwrap_or_else(|_| panic!("helper did not mint {identity} key"))
+                .expect("read helper key")
+                .unwrap_or_else(|| panic!("helper exited before printing {identity} key"));
+        let key: AwaitEventKey = serde_json::from_str(&encoded_key)
+            .unwrap_or_else(|error| panic!("decode helper {identity} key: {error}"));
+
+        child
+            .kill()
+            .await
+            .unwrap_or_else(|error| panic!("kill parked {identity} helper: {error}"));
+        let status = child
+            .wait()
+            .await
+            .unwrap_or_else(|error| panic!("reap parked {identity} helper: {error}"));
+        assert!(
+            !status.success(),
+            "killed {identity} helper exited successfully"
+        );
+
+        let terminal = Resolution::Ok(serde_json::json!({
+            "cold_process": true,
+            "identity": identity,
+            "nonce": nonce,
+        }));
+        let resolver = SqliteEffectHost::open(&path)
+            .await
+            .expect("cold-process resolver");
+        assert_eq!(
+            resolver
+                .resolve_await_event(&key, terminal.clone())
+                .await
+                .unwrap_or_else(|error| panic!("resolve killed-helper {identity} key: {error}")),
+            ResolveOutcome::Accepted
+        );
+        drop(resolver);
+
+        let observer = SqliteEffectHost::open(&path)
+            .await
+            .expect("cold-process observer");
+        assert_eq!(
+            observer
+                .peek_await_event(&key)
+                .await
+                .unwrap_or_else(|error| panic!("peek killed-helper {identity} key: {error}")),
+            Some(terminal.clone())
+        );
+        assert_eq!(
+            observer
+                .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None,)
+                .await
+                .unwrap_or_else(|error| panic!("observe killed-helper {identity} key: {error}")),
+            terminal
+        );
+    }
 }
 
 #[tokio::test]

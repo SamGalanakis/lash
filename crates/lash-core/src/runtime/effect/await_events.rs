@@ -16,7 +16,7 @@ use super::executor::{
 };
 use super::promise_semantics::{
     PromiseState, PromiseTransition, SessionRevocationTransition, cancel_sweep, constant_time_eq,
-    derive_key_id, resolve, revoke_session, session_allows_access,
+    derive_key_id, resolve, revoke_session, session_allows_access, sign_material,
 };
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -211,13 +211,7 @@ impl AwaitEventRegistry {
                 format!("failed to initialize await-event key signer: {err}"),
             )
         })?;
-        let canonical = serde_json::to_vec(&(scope, wait, key_id)).map_err(|err| {
-            RuntimeError::new(
-                "await_event_key_sign",
-                format!("failed to serialize await-event key identity: {err}"),
-            )
-        })?;
-        mac.update(&canonical);
+        mac.update(&sign_material(scope, wait, key_id));
         Ok(format!("{:x}", mac.finalize().into_bytes()))
     }
 
