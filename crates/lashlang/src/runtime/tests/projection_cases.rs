@@ -1,7 +1,7 @@
 fn test_image() -> Value {
     Value::Image(Box::new(ImageValue::new(
         "img-1",
-        "image/png",
+        crate::MediaType::parse("image/png").unwrap(),
         "chart.png",
         1234,
         Some(640),

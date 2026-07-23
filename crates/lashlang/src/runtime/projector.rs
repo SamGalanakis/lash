@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(
             default_project(&Value::Image(Box::new(ImageValue::new(
                 "img-1",
-                "image/png",
+                crate::MediaType::parse("image/png").unwrap(),
                 "plot.png",
                 123,
                 Some(10),

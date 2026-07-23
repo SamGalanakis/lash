@@ -1,8 +1,12 @@
-use crate::{AttachmentRef, ToolCallRecord};
+use crate::{AttachmentRef, MediaType, ToolCallRecord};
 
+/// An image emitted by a trajectory step.
+///
+/// Printed images deliberately live outside the provider-attachment source
+/// seams, while sharing their validated [`MediaType`] vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecImage {
-    pub mime: String,
+    pub mime: MediaType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<AttachmentRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -50,4 +54,37 @@ pub struct PromptUsage {
     pub cache_read_input_tokens: usize,
     pub cache_write_input_tokens: usize,
     pub context_budget_tokens: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_image_media_type_round_trips_as_the_existing_string_wire_shape() {
+        let image = ExecImage {
+            mime: MediaType::parse("image/webp").unwrap(),
+            reference: None,
+            data: vec![1, 2, 3],
+            label: "plot".to_string(),
+            width: Some(320),
+            height: Some(180),
+        };
+
+        let value = serde_json::to_value(&image).unwrap();
+        assert_eq!(value["mime"], "image/webp");
+        assert_eq!(serde_json::from_value::<ExecImage>(value).unwrap(), image);
+    }
+
+    #[test]
+    fn exec_image_rejects_an_invalid_media_type_on_deserialization() {
+        let error = serde_json::from_value::<ExecImage>(serde_json::json!({
+            "mime": "not-a-mime",
+            "data": [],
+            "label": "plot"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid media type"));
+    }
 }

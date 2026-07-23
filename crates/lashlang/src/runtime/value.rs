@@ -82,7 +82,7 @@ impl FromIterator<Value> for ListValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageValue {
     pub id: String,
-    pub mime: String,
+    pub mime: crate::MediaType,
     pub label: String,
     pub size: u64,
     pub width: Option<u32>,
@@ -92,7 +92,7 @@ pub struct ImageValue {
 impl ImageValue {
     pub fn new(
         id: impl Into<String>,
-        mime: impl Into<String>,
+        mime: crate::MediaType,
         label: impl Into<String>,
         size: u64,
         width: Option<u32>,
@@ -100,7 +100,7 @@ impl ImageValue {
     ) -> Self {
         Self {
             id: id.into(),
-            mime: mime.into(),
+            mime,
             label: label.into(),
             size,
             width,
@@ -136,7 +136,7 @@ impl<'de> Deserialize<'de> for ImageValue {
             #[serde(rename = "type")]
             kind: String,
             id: String,
-            mime: String,
+            mime: crate::MediaType,
             label: String,
             size: u64,
             #[serde(default)]

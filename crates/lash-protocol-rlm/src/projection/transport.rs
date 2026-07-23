@@ -317,7 +317,7 @@ fn json_map_to_image(map: &serde_json::Map<String, Value>) -> Option<ImageValue>
     }
     Some(ImageValue::new(
         map.get("id")?.as_str()?.to_string(),
-        map.get("mime")?.as_str()?.to_string(),
+        lash_core::MediaType::parse(map.get("mime")?.as_str()?).ok()?,
         map.get("label")?.as_str()?.to_string(),
         map.get("size")?.as_u64()?,
         optional_json_u32(map.get("width")?)?,

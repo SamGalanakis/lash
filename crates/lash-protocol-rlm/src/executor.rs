@@ -2468,7 +2468,7 @@ mod tests {
         block_on(async {
             let image = lashlang::ImageValue::new(
                 "image-sha256",
-                "image/webp",
+                lash_core::MediaType::parse("image/webp").unwrap(),
                 "cover",
                 73,
                 Some(320),

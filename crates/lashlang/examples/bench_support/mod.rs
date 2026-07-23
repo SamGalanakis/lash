@@ -156,7 +156,7 @@ pub fn seeded_state_for(scenario: Scenario) -> State {
             "img".to_string(),
             Value::Image(Box::new(ImageValue::new(
                 "img-1",
-                "image/png",
+                lashlang::MediaType::parse("image/png").unwrap(),
                 "chart.png",
                 1234,
                 Some(640),
