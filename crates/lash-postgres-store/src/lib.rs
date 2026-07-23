@@ -23,20 +23,20 @@ use lash_core::store::{
 };
 use lash_core::{
     AbandonRequest, AttachmentId, AttachmentIntent, AttachmentManifest, AttachmentManifestEntry,
-    AttachmentOwnerKind, AwaitEventResolver, BlobRef, DeliveryPolicy, DurabilityTier, EffectHost,
-    ExecutionScope, GcReport, LeaseOwnerIdentity, LeaseOwnerLiveness, MergeKey,
-    PersistedSegmentHandover, ProcessAwaitOutput, ProcessChangeCursor, ProcessEvent,
-    ProcessEventAppendRequest, ProcessEventAppendResult, ProcessExternalRef,
-    ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease, ProcessLeaseCompletion,
-    ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord, ProcessRegistration,
-    ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimeEffectCommand,
+    AttachmentOwnerKind, AwaitEventResolver, BlobRef, CanonicalRuntimeEffectEnvelope,
+    DeliveryPolicy, DurabilityTier, EffectHost, ExecutionScope, GcReport, LeaseOwnerIdentity,
+    LeaseOwnerLiveness, MergeKey, PersistedSegmentHandover, ProcessAwaitOutput,
+    ProcessChangeCursor, ProcessEvent, ProcessEventAppendRequest, ProcessEventAppendResult,
+    ProcessExternalRef, ProcessHandleDescriptor, ProcessHandleGrant, ProcessLease,
+    ProcessLeaseCompletion, ProcessLiveReferenceSummary, ProcessPruneReport, ProcessRecord,
+    ProcessRegistration, ProcessRegistry, ProcessStarted, QueuedWorkStore, RuntimeEffectCommand,
     RuntimeEffectController, RuntimeEffectControllerError, RuntimeEffectEnvelope,
     RuntimeEffectLocalExecutor, RuntimeEffectOutcome, RuntimeError, RuntimePersistence,
     ScopedEffectController, SessionCommitStore, SessionExecutionLease,
     SessionExecutionLeaseClaimOutcome, SessionExecutionLeaseCompletion, SessionExecutionLeaseFence,
     SessionExecutionLeaseStore, SessionMeta, SessionNodeRecord, SessionReadScope, SessionScope,
     SessionStoreCreateRequest, SessionStoreFactory, SlotPolicy, StoreError, StoreMaintenance,
-    TokenLedgerEntry, TurnInputStore, VacuumReport,
+    TokenLedgerEntry, TurnInputStore, VacuumReport, validate_replayed_effect_envelope,
 };
 use lash_core::{
     PluginError, TriggerDeliveryReservation, TriggerOccurrenceRecord, TriggerOccurrenceRequest,
@@ -74,7 +74,11 @@ const SCHEMA_COMPONENT: &str = "lash-postgres-store";
 // Bumped to 16 for FIG-562 durable AwaitEvent promises. The effect schema now
 // owns authenticated promise rows, a store-resident HMAC secret, and durable
 // session-revocation tombstones. Pre-16 databases are rejected and recreated.
-const SCHEMA_VERSION: i32 = 16;
+//
+// Bumped to 17 for FIG-579 canonical runtime-effect envelope persistence.
+// Pre-17 databases cannot produce structural replay mismatch diagnostics and
+// are rejected and recreated.
+const SCHEMA_VERSION: i32 = 17;
 const PROCESS_LEASE_SCHEMA_VERSION: u32 = lash_core::PROCESS_LEASE_SCHEMA_VERSION;
 
 #[derive(Clone)]

@@ -46,6 +46,10 @@ struct PostgresClaimedEffect {
 }
 
 enum PostgresPreparedEffect {
+    ReplayMismatch {
+        recorded_envelope: Box<CanonicalRuntimeEffectEnvelope>,
+        stored_envelope_hash: String,
+    },
     ReplayOutcome {
         outcome: Box<RuntimeEffectOutcome>,
         due_at_ms: Option<u64>,
@@ -59,6 +63,7 @@ enum PostgresPreparedEffect {
 
 struct PostgresEffectRow {
     envelope_hash: String,
+    envelope_json: String,
     status: String,
     outcome_json: Option<String>,
     error_json: Option<String>,
@@ -190,6 +195,7 @@ impl PostgresRuntimeEffectController {
     async fn prepare_effect(
         &self,
         envelope: &RuntimeEffectEnvelope,
+        reconstructed_envelope: &CanonicalRuntimeEffectEnvelope,
     ) -> Result<PostgresPreparedEffect, RuntimeEffectControllerError> {
         let replay_key = envelope
             .invocation
@@ -201,7 +207,9 @@ impl PostgresRuntimeEffectController {
                 )
             })?
             .to_string();
-        let envelope_hash = envelope.stable_hash()?;
+        let envelope_hash = reconstructed_envelope.hash().to_string();
+        let envelope_json =
+            serde_json::to_string(reconstructed_envelope).map_err(postgres_effect_encode_error)?;
         let scope_id = self.scope.id().to_string();
         let lease_token = self.inner.next_lease_token();
         let replay_mode = self.inner.replay_mode.load(Ordering::SeqCst);
@@ -247,16 +255,17 @@ impl PostgresRuntimeEffectController {
                 let due_at_param = due_at_ms.map(|value| value as i64);
                 let inserted = sqlx::query(
                     "INSERT INTO lash_runtime_effect_replay (
-                        scope_id, replay_key, envelope_hash, status, outcome_json,
+                        scope_id, replay_key, envelope_hash, envelope_json, status, outcome_json,
                         error_json, lease_owner_id, lease_token, lease_expires_at_ms,
                         due_at_ms, created_at_ms, updated_at_ms
                      )
-                     VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10)
+                     VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, $8, $9, $10, $11)
                      ON CONFLICT (scope_id, replay_key) DO NOTHING",
                 )
                 .bind(&scope_id)
                 .bind(&replay_key)
                 .bind(&envelope_hash)
+                .bind(&envelope_json)
                 .bind(POSTGRES_EFFECT_STATUS_IN_PROGRESS)
                 .bind(&owner_id)
                 .bind(&lease_token)
@@ -323,12 +332,12 @@ impl PostgresRuntimeEffectController {
             now,
         } = inputs;
         if row.envelope_hash != envelope_hash {
-            return Err(RuntimeEffectControllerError::new(
-                "postgres_effect_replay_hash_conflict",
-                format!(
-                    "runtime effect replay key `{replay_key}` in scope `{scope_id}` was reused with a different envelope hash"
-                ),
-            ));
+            let recorded_envelope: CanonicalRuntimeEffectEnvelope =
+                serde_json::from_str(&row.envelope_json).map_err(postgres_effect_decode_error)?;
+            return Ok(PostgresPreparedEffect::ReplayMismatch {
+                recorded_envelope: Box::new(recorded_envelope),
+                stored_envelope_hash: row.envelope_hash,
+            });
         }
         let existing_due_at_ms = row.due_at_ms.map(|value| value as u64);
         match row.status.as_str() {
@@ -615,8 +624,31 @@ impl RuntimeEffectController for PostgresRuntimeEffectController {
         envelope: RuntimeEffectEnvelope,
         local_executor: RuntimeEffectLocalExecutor<'_>,
     ) -> Result<RuntimeEffectOutcome, RuntimeEffectControllerError> {
+        let reconstructed_envelope = envelope.canonical_form()?;
+        let replay_trace = local_executor.replay_validation_trace().cloned();
         loop {
-            match self.prepare_effect(&envelope).await? {
+            match self
+                .prepare_effect(&envelope, &reconstructed_envelope)
+                .await?
+            {
+                PostgresPreparedEffect::ReplayMismatch {
+                    recorded_envelope,
+                    stored_envelope_hash,
+                } => {
+                    validate_replayed_effect_envelope(
+                        recorded_envelope.as_ref(),
+                        &reconstructed_envelope,
+                        "postgres_effect_replay_hash_conflict",
+                        replay_trace.as_ref(),
+                    )?;
+                    return Err(RuntimeEffectControllerError::new(
+                        "runtime_effect_envelope_canonical_hash_invariant",
+                        format!(
+                            "stored envelope_hash {stored_envelope_hash} did not match the persisted canonical envelope hash {}",
+                            recorded_envelope.hash()
+                        ),
+                    ));
+                }
                 PostgresPreparedEffect::ReplayOutcome { outcome, due_at_ms } => {
                     postgres_effect_sleep_until_due(due_at_ms).await;
                     return Ok(*outcome);
@@ -686,7 +718,8 @@ async fn postgres_select_effect_row_for_update(
     replay_key: &str,
 ) -> Result<Option<PostgresEffectRow>, RuntimeEffectControllerError> {
     let row = sqlx::query(
-        "SELECT envelope_hash, status, outcome_json, error_json, lease_expires_at_ms, due_at_ms
+        "SELECT envelope_hash, envelope_json, status, outcome_json, error_json,
+                lease_expires_at_ms, due_at_ms
          FROM lash_runtime_effect_replay
          WHERE scope_id = $1 AND replay_key = $2
          FOR UPDATE",
@@ -702,6 +735,7 @@ async fn postgres_select_effect_row_for_update(
 fn postgres_effect_row(row: PgRow) -> PostgresEffectRow {
     PostgresEffectRow {
         envelope_hash: row.get("envelope_hash"),
+        envelope_json: row.get("envelope_json"),
         status: row.get("status"),
         outcome_json: row.get("outcome_json"),
         error_json: row.get("error_json"),
