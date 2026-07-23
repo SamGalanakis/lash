@@ -1,4 +1,4 @@
-async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
+async fn ensure_schema(pool: &PgPool) -> Result<Vec<u8>, StoreError> {
     let mut tx = pool.begin().await.map_err(store_sqlx_error)?;
     tx.execute("SELECT pg_advisory_xact_lock(715421, 907001)")
         .await
@@ -228,6 +228,30 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_lash_runtime_effect_replay_lease
             ON lash_runtime_effect_replay(status, lease_expires_at_ms);
 
+        CREATE TABLE IF NOT EXISTS lash_await_event_meta (
+            singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+            signing_secret BYTEA NOT NULL,
+            CHECK (singleton)
+        );
+
+        CREATE TABLE IF NOT EXISTS lash_await_event_waits (
+            key_id TEXT PRIMARY KEY,
+            scope_json TEXT NOT NULL,
+            wait_json TEXT NOT NULL,
+            session_id TEXT,
+            turn_control BOOLEAN NOT NULL,
+            terminal_json TEXT,
+            created_at_ms BIGINT NOT NULL,
+            resolved_at_ms BIGINT
+        );
+        CREATE INDEX IF NOT EXISTS idx_lash_await_event_waits_session
+            ON lash_await_event_waits(session_id);
+
+        CREATE TABLE IF NOT EXISTS lash_await_event_revoked_sessions (
+            session_id TEXT PRIMARY KEY,
+            revoked_at_ms BIGINT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS lash_trigger_subscriptions (
             subscription_id TEXT PRIMARY KEY,
             owner_scope TEXT NOT NULL,
@@ -315,5 +339,29 @@ async fn ensure_schema(pool: &PgPool) -> Result<(), StoreError> {
                 .map_err(store_sqlx_error)?;
         }
     }
-    tx.commit().await.map_err(store_sqlx_error)
+    let mut secret_candidate = Vec::with_capacity(32);
+    secret_candidate.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    secret_candidate.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    sqlx::query(
+        "INSERT INTO lash_await_event_meta (singleton, signing_secret)
+         VALUES (TRUE, $1)
+         ON CONFLICT (singleton) DO NOTHING",
+    )
+    .bind(secret_candidate)
+    .execute(&mut *tx)
+    .await
+    .map_err(store_sqlx_error)?;
+    let signing_secret: Vec<u8> =
+        sqlx::query_scalar("SELECT signing_secret FROM lash_await_event_meta WHERE singleton = TRUE")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(store_sqlx_error)?;
+    if signing_secret.len() != 32 {
+        return Err(StoreError::Backend(format!(
+            "Postgres await-event signing secret has {} bytes, expected 32",
+            signing_secret.len()
+        )));
+    }
+    tx.commit().await.map_err(store_sqlx_error)?;
+    Ok(signing_secret)
 }

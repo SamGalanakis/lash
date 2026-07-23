@@ -157,6 +157,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn resolver_defaults_refuse_turn_control_without_an_explicit_host() {
+        struct UnsupportedResolver;
+        impl AwaitEventResolver for UnsupportedResolver {}
+
+        let resolver = UnsupportedResolver;
+        let scope = ExecutionScope::turn("unsupported-session", "unsupported-turn");
+        for wait in [
+            AwaitEventWaitIdentity::TurnCancelGate,
+            AwaitEventWaitIdentity::TurnTerminal,
+            AwaitEventWaitIdentity::tool_completion("unsupported-call"),
+        ] {
+            let error = resolver
+                .await_event_key(&scope, wait)
+                .await
+                .expect_err("default resolver must refuse every identity");
+            assert_eq!(error.code.as_str(), "await_event_unsupported");
+        }
+
+        let key = InlineRuntimeEffectController::default()
+            .await_event_key(&scope, AwaitEventWaitIdentity::TurnCancelGate)
+            .await
+            .expect("explicit inline controller key");
+        assert_eq!(
+            resolver
+                .resolve_await_event(&key, Resolution::Cancelled)
+                .await
+                .expect("default resolution has one opaque shape"),
+            ResolveOutcome::UnknownOrRevoked
+        );
+        for error in [
+            resolver
+                .peek_await_event(&key)
+                .await
+                .expect_err("default resolver must refuse reads"),
+            resolver
+                .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+                .await
+                .expect_err("default resolver must refuse waits"),
+            resolver
+                .revoke_await_events_for_session("unsupported-session")
+                .await
+                .expect_err("default resolver must refuse revocation"),
+        ] {
+            assert_eq!(error.code.as_str(), "await_event_unsupported");
+        }
+    }
+
     #[test]
     fn process_effect_envelope_round_trips_prepared_tool_call() {
         let registration = crate::ProcessRegistration::new(

@@ -5,8 +5,9 @@ use lash_core::testing::conformance::{
     ReopenableProcessRegistry, ReopenableRuntimePersistence, ReopenableTriggerStore,
 };
 use lash_core::{
-    DurabilityTier, ExecutionScope, ProcessExecutionEnvStore, ProcessRegistry, RuntimePersistence,
-    SessionStoreFactory, TriggerStore,
+    AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, DurabilityTier, EffectHost,
+    ExecutionScope, ProcessExecutionEnvStore, ProcessRegistry, Resolution, ResolveOutcome,
+    RuntimePersistence, SessionStoreFactory, TriggerStore,
 };
 use lash_postgres_store::{
     PostgresEffectReplayOptions, PostgresRuntimeEffectController, PostgresStorage,
@@ -51,7 +52,7 @@ async fn reset(storage: &PostgresStorage) {
         "SELECT tablename FROM pg_tables
          WHERE schemaname = 'public'
            AND tablename LIKE 'lash\\_%'
-           AND tablename <> 'lash_schema_versions'
+           AND tablename NOT IN ('lash_schema_versions', 'lash_await_event_meta')
          ORDER BY tablename",
     )
     .fetch_all(pool)
@@ -298,7 +299,7 @@ async fn postgres_turn_commit_stamps_use_injected_store_clock_when_configured() 
 }
 
 // Blocker 1: `from_pool` must enforce the same component schema-version gate as
-// `connect`/`connect_with`. Writing main's pre-attachment version (14) into
+// `connect`/`connect_with`. Writing the pre-AwaitEvent version (15) into
 // `lash_schema_versions` and then constructing over the pool must fail loudly with
 // the mismatch error, so a pre-cutover database can never be adopted post-bump.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -310,7 +311,7 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     let pool = storage.pool().clone();
     // Force the recorded component version to a stale value.
     sqlx::query(
-        "INSERT INTO lash_schema_versions (component, version) VALUES ('lash-postgres-store', 14)
+        "INSERT INTO lash_schema_versions (component, version) VALUES ('lash-postgres-store', 15)
          ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version",
     )
     .execute(&pool)
@@ -322,20 +323,207 @@ async fn postgres_from_pool_enforces_schema_version_gate_when_configured() {
     // Restore the correct version BEFORE asserting so a failed assert never leaves
     // the shared database wedged for other cases.
     sqlx::query(
-        "UPDATE lash_schema_versions SET version = 15 WHERE component = 'lash-postgres-store'",
+        "UPDATE lash_schema_versions SET version = 16 WHERE component = 'lash-postgres-store'",
     )
     .execute(&pool)
     .await
     .expect("restore schema version");
 
     let message = match result {
-        Ok(_) => panic!("from_pool must reject a version-14 database"),
+        Ok(_) => panic!("from_pool must reject a version-15 database"),
         Err(err) => err.to_string(),
     };
     assert!(
-        message.contains("version 14") && message.contains("expected 15"),
+        message.contains("version 15") && message.contains("expected 16"),
         "expected a schema-version mismatch error, got: {message}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_effect_host_satisfies_cold_instance_await_event_conformance_when_configured() {
+    let Some((database_lock, storage)) = storage().await else {
+        eprintln!(
+            "skipping Postgres cold-instance AwaitEvent conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+    drop(storage);
+    let database_url = database_url().expect("configured Postgres database URL");
+    lash_core::testing::conformance::effect_host_await_events_cold_instance(|| {
+        let database_url = database_url.clone();
+        let storage = sync_await(async move {
+            PostgresStorage::connect(&database_url)
+                .await
+                .expect("cold PostgreSQL effect host")
+        });
+        Arc::new(storage.effect_host()) as Arc<dyn EffectHost>
+    })
+    .await;
+    drop(database_lock);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_await_event_key_mint_is_pure_and_signatures_match_sqlite_when_seeded() {
+    let Some((_database_lock, storage)) = storage().await else {
+        eprintln!(
+            "skipping Postgres await-event signing test: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+    let database_url = database_url().expect("configured Postgres database URL");
+    let scope = ExecutionScope::turn("pure-key-session", "pure-key-turn");
+    let wait = AwaitEventWaitIdentity::tool_completion("pure-key-call");
+
+    let (first, second) = tokio::join!(
+        async {
+            PostgresStorage::connect(&database_url)
+                .await
+                .expect("first concurrent storage")
+                .effect_host()
+                .await_event_key(&scope, wait.clone())
+                .await
+                .expect("first concurrent key")
+        },
+        async {
+            PostgresStorage::connect(&database_url)
+                .await
+                .expect("second concurrent storage")
+                .effect_host()
+                .await_event_key(&scope, wait.clone())
+                .await
+                .expect("second concurrent key")
+        },
+    );
+    assert_eq!(
+        first, second,
+        "concurrent openers must read one store secret"
+    );
+    let wait_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lash_await_event_waits")
+        .fetch_one(storage.pool())
+        .await
+        .expect("count await-event waits");
+    assert_eq!(wait_count, 0, "key mint must not register a promise row");
+    let secret: Vec<u8> = sqlx::query_scalar(
+        "SELECT signing_secret FROM lash_await_event_meta WHERE singleton = TRUE",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("read PostgreSQL await-event signer");
+    assert_eq!(secret.len(), 32);
+
+    let directory = tempfile::tempdir().expect("SQLite parity tempdir");
+    let sqlite_path = directory.path().join("signature-parity.db");
+    drop(
+        lash_sqlite_store::SqliteEffectHost::open(&sqlite_path)
+            .await
+            .expect("initialize SQLite parity store"),
+    );
+    let connection =
+        rusqlite::Connection::open(&sqlite_path).expect("open raw SQLite parity store");
+    connection
+        .execute(
+            "UPDATE await_event_meta SET signing_secret = ?1 WHERE singleton = 1",
+            rusqlite::params![secret],
+        )
+        .expect("seed SQLite with PostgreSQL signing secret");
+    drop(connection);
+    let sqlite_key = lash_sqlite_store::SqliteEffectHost::open(&sqlite_path)
+        .await
+        .expect("reopen seeded SQLite parity store")
+        .await_event_key(&scope, wait)
+        .await
+        .expect("SQLite parity key");
+    assert_eq!(
+        first, sqlite_key,
+        "PostgreSQL and SQLite must emit byte-identical keys for identical secret and identity"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_effect_host_satisfies_cold_process_await_event_conformance_when_configured() {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    use tokio::process::Command;
+
+    let Some((_database_lock, storage)) = storage().await else {
+        eprintln!(
+            "skipping Postgres cold-process AwaitEvent conformance: LASH_POSTGRES_DATABASE_URL is not set"
+        );
+        return;
+    };
+    reset(&storage).await;
+    for identity in ["tool_completion", "turn_cancel_gate"] {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_postgres-await-event-helper"))
+            .arg(identity)
+            .arg(&nonce)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn cold-process helper for {identity}: {error}"));
+        let stdout = child.stdout.take().expect("helper stdout pipe");
+        let mut lines = BufReader::new(stdout).lines();
+        let encoded_key =
+            tokio::time::timeout(std::time::Duration::from_secs(30), lines.next_line())
+                .await
+                .unwrap_or_else(|_| panic!("helper did not mint {identity} key"))
+                .expect("read helper key")
+                .unwrap_or_else(|| panic!("helper exited before printing {identity} key"));
+        let key: AwaitEventKey = serde_json::from_str(&encoded_key)
+            .unwrap_or_else(|error| panic!("decode helper {identity} key: {error}"));
+
+        child
+            .kill()
+            .await
+            .unwrap_or_else(|error| panic!("kill parked {identity} helper: {error}"));
+        let status = child
+            .wait()
+            .await
+            .unwrap_or_else(|error| panic!("reap parked {identity} helper: {error}"));
+        assert!(
+            !status.success(),
+            "killed {identity} helper exited successfully"
+        );
+
+        let terminal = Resolution::Ok(serde_json::json!({
+            "cold_process": true,
+            "identity": identity,
+            "nonce": nonce,
+        }));
+        let resolver =
+            PostgresStorage::connect(&database_url().expect("configured Postgres database URL"))
+                .await
+                .expect("cold-process resolver")
+                .effect_host();
+        assert_eq!(
+            resolver
+                .resolve_await_event(&key, terminal.clone())
+                .await
+                .unwrap_or_else(|error| panic!("resolve killed-helper {identity} key: {error}")),
+            ResolveOutcome::Accepted
+        );
+        drop(resolver);
+
+        let observer =
+            PostgresStorage::connect(&database_url().expect("configured Postgres database URL"))
+                .await
+                .expect("cold-process observer")
+                .effect_host();
+        assert_eq!(
+            observer
+                .peek_await_event(&key)
+                .await
+                .unwrap_or_else(|error| panic!("peek killed-helper {identity} key: {error}")),
+            Some(terminal.clone())
+        );
+        assert_eq!(
+            observer
+                .await_await_event(&key, tokio_util::sync::CancellationToken::new(), None)
+                .await
+                .unwrap_or_else(|error| panic!("observe killed-helper {identity} key: {error}")),
+            terminal
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

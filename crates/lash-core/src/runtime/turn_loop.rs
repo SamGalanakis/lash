@@ -2463,17 +2463,27 @@ mod tests {
         publish_terminal_after_commit,
     };
     use crate::{
-        AwaitEventKey, AwaitEventResolver, Resolution, ResolveOutcome, RuntimeError, TurnAddress,
+        AwaitEventKey, AwaitEventResolver, AwaitEventWaitIdentity, ExecutionScope,
+        InlineRuntimeEffectController, Resolution, ResolveOutcome, RuntimeError, TurnAddress,
         TurnCancellationEvidence, TurnFinish, TurnOutcome, TurnTerminal,
     };
 
     #[derive(Default)]
     struct RejectTerminalPublication {
         attempts: AtomicUsize,
+        inline: InlineRuntimeEffectController,
     }
 
     #[async_trait::async_trait]
     impl AwaitEventResolver for RejectTerminalPublication {
+        async fn await_event_key(
+            &self,
+            scope: &ExecutionScope,
+            wait: AwaitEventWaitIdentity,
+        ) -> Result<AwaitEventKey, RuntimeError> {
+            self.inline.await_event_key(scope, wait).await
+        }
+
         async fn resolve_await_event(
             &self,
             _key: &AwaitEventKey,
@@ -2484,6 +2494,40 @@ mod tests {
                 "transient_terminal_publication",
                 "terminal backend unavailable",
             ))
+        }
+
+        async fn peek_await_event(
+            &self,
+            key: &AwaitEventKey,
+        ) -> Result<Option<Resolution>, RuntimeError> {
+            self.inline.peek_await_event(key).await
+        }
+
+        async fn await_await_event(
+            &self,
+            key: &AwaitEventKey,
+            cancel: tokio_util::sync::CancellationToken,
+            deadline: Option<std::time::Instant>,
+        ) -> Result<Resolution, RuntimeError> {
+            self.inline.await_await_event(key, cancel, deadline).await
+        }
+
+        async fn revoke_await_events_for_session(
+            &self,
+            session_id: &str,
+        ) -> Result<(), RuntimeError> {
+            self.inline
+                .revoke_await_events_for_session(session_id)
+                .await
+        }
+
+        async fn cancel_await_events_for_session(
+            &self,
+            session_id: &str,
+        ) -> Result<(), RuntimeError> {
+            self.inline
+                .cancel_await_events_for_session(session_id)
+                .await
         }
     }
 
