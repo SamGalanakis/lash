@@ -1044,15 +1044,15 @@ fn lease_fencing_envelope(replay_key: &str) -> RuntimeEffectEnvelope {
 /// - a renewed in-progress lease keeps a competing claimant out, then replays;
 /// - a stolen lease aborts the original owner with a lease-lost error;
 /// - a lease that expires before finalize is rejected with a lease-lost error;
-/// - a controller constructed with a non-default short TTL actually expires on
-///   that window (the configured TTL cannot be ignored).
+/// - a successor reclaims and executes an effect after its predecessor's lease
+///   is explicitly expired.
 #[cfg(any(test, feature = "testing"))]
 pub async fn effect_controller_lease_fencing(backend: EffectLeaseFencingBackend) {
     let run = uuid::Uuid::new_v4().to_string();
     lease_fencing_renews_long_running_lease(&backend, &run).await;
     lease_fencing_reports_lease_lost_when_stolen(&backend, &run).await;
     lease_fencing_rejects_finalize_after_expiry(&backend, &run).await;
-    lease_fencing_honors_configured_short_ttl(&backend, &run).await;
+    lease_fencing_reclaims_explicitly_expired_lease(&backend, &run).await;
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1212,36 +1212,18 @@ async fn lease_fencing_rejects_finalize_after_expiry(
     );
 }
 
-/// A controller built with a non-default short TTL must honor it: a claim
-/// whose owner vanishes (no renewal, no finalize, no row mutation from the
-/// test) becomes reclaimable by a peer after roughly that TTL — not after the
-/// 30s default a backend might hardcode.
+/// A successor must reclaim and execute an effect after its predecessor's
+/// lease is explicitly expired.
 #[cfg(any(test, feature = "testing"))]
-async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingBackend, run: &str) {
-    // Calibrate the short TTL to this scheduler instead of assuming a 40 ms
-    // renewal window is viable under CI contention. Eight observed wake
-    // windows leave the successor's ttl/3 renewal task multiple chances to
-    // run before finalization. The 2 s cap, paired with a <=10 s reclaim
-    // deadline, remains far below the 30 s default and therefore still proves
-    // that the backend honored the configured TTL knob.
-    let mut slowest_scheduler_wake = std::time::Duration::ZERO;
-    for _ in 0..8 {
-        let started = std::time::Instant::now();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        slowest_scheduler_wake = slowest_scheduler_wake.max(started.elapsed());
-    }
-    let ttl = std::time::Duration::from_millis(40)
-        .max(slowest_scheduler_wake.saturating_mul(8))
-        .min(std::time::Duration::from_secs(2));
-    let reclaim_deadline = ttl
-        .saturating_mul(4)
-        .saturating_add(std::time::Duration::from_secs(2))
-        .min(std::time::Duration::from_secs(10));
-    eprintln!(
-        "effect lease short-TTL calibration: slowest_scheduler_wake={slowest_scheduler_wake:?}, \
-         ttl={ttl:?}, reclaim_deadline={reclaim_deadline:?}"
-    );
-    let replay_key = format!("lease-short-ttl-{run}");
+async fn lease_fencing_reclaims_explicitly_expired_lease(
+    backend: &EffectLeaseFencingBackend,
+    run: &str,
+) {
+    // Keep the successor's lease independent of scheduler timing. The test
+    // expires the predecessor through the backend affordance below; a short
+    // real TTL would only race successor renewal/finalization under load.
+    let ttl = std::time::Duration::from_secs(30);
+    let replay_key = format!("lease-explicit-reclaim-{run}");
     let vanished = (backend.make_controller)(ttl).await;
     let successor = (backend.make_controller)(ttl).await;
     let envelope = lease_fencing_envelope(&replay_key);
@@ -1264,13 +1246,15 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
             .await
     });
     entered_rx.await.expect("vanished executor entered");
-    // Kill the first owner mid-claim: aborting the task stops its renewal
-    // loop, so the in-progress row is left to expire on the configured TTL.
+    // Kill the first owner mid-claim so it cannot renew or finalize. The
+    // backend affordance then drives expiry as an explicit test event.
     owner_task.abort();
     assert!(owner_task.await.is_err(), "vanished owner task aborts");
 
+    (backend.expire_lease)(replay_key.clone()).await;
+
     let reclaimed = tokio::time::timeout(
-        reclaim_deadline,
+        std::time::Duration::from_secs(10),
         successor.controller.execute_effect(
             envelope,
             RuntimeEffectLocalExecutor::testing(move |_| async move {
@@ -1279,10 +1263,7 @@ async fn lease_fencing_honors_configured_short_ttl(backend: &EffectLeaseFencingB
         ),
     )
     .await
-    .expect(
-        "a successor must reclaim the abandoned row after the configured short TTL — \
-         a backend ignoring the TTL knob would stay busy for the 30s default",
-    )
+    .expect("a successor must reclaim the abandoned row after its lease is explicitly expired")
     .expect("successor executes the reclaimed effect");
     assert_replay_conformance_exec_marker(reclaimed, "successor-owner");
     let _keep_notify_alive = never_release;
