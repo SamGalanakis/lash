@@ -223,6 +223,9 @@ fn restate_unknown_or_revoked() -> RuntimeError {
 }
 
 const DURABLE_WAIT_PROMISE_KEY: &str = "resolution";
+const PROCESS_CANCEL_PROMISE_KEY: &str = "process_cancel_requested";
+const PROCESS_CANCEL_CONFIRM_RETRIES: usize = 3;
+const PROCESS_CANCEL_CONFIRM_RETRY_DELAY: Duration = Duration::from_millis(5);
 const LEGACY_DURABLE_WAIT_INDEX_STATE_KEY: &str = "waits";
 const DURABLE_WAIT_INDEX_METADATA_KEY: &str = "wait-index/v1/metadata";
 const DURABLE_WAIT_INDEX_WAIT_PREFIX: &str = "wait-index/v1/wait/";
@@ -455,6 +458,19 @@ where
     let payload = serde_json::to_string(&resolution)
         .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
     context.resolve_promise(&key.promise_key(), payload);
+    Ok(())
+}
+
+fn resolve_process_cancel_signal<'ctx, C>(
+    context: &C,
+    signal: RestateProcessCancelSignal,
+) -> HandlerResult<()>
+where
+    C: ContextPromises<'ctx>,
+{
+    let payload = serde_json::to_string(&signal)
+        .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+    context.resolve_promise(PROCESS_CANCEL_PROMISE_KEY, payload);
     Ok(())
 }
 
@@ -1791,6 +1807,7 @@ impl ProcessAttach for RestateProcessIngressRunner {
 /// [`workflow`](Self::workflow) on the Restate endpoint.
 pub struct RestateProcessDeployment {
     driver: ProcessWorkDriver,
+    ingress: RestateIngressClient,
 }
 
 impl RestateProcessDeployment {
@@ -1812,15 +1829,19 @@ impl RestateProcessDeployment {
         registry: Arc<dyn ProcessRegistry>,
         sink: Option<Arc<dyn ProcessEventSink>>,
     ) -> Self {
+        let connection = connection.into();
         let (registry, hub) = watch_process_registry_with_sink(registry, sink);
         let ingress_runner = Arc::new(RestateProcessIngressRunner::new(
-            connection,
+            connection.clone(),
             Arc::clone(&registry),
         ));
         let run_handle: Arc<dyn ProcessRunHandle> = ingress_runner.clone();
         let attach: Arc<dyn ProcessAttach> = ingress_runner;
         let driver = ProcessWorkDriver::from_watched(registry, hub, run_handle).with_attach(attach);
-        Self { driver }
+        Self {
+            driver,
+            ingress: RestateIngressClient::new(connection),
+        }
     }
 
     pub fn process_work_driver(&self) -> ProcessWorkDriver {
@@ -1834,6 +1855,7 @@ impl RestateProcessDeployment {
         LashProcessWorkflowImpl::new(
             Arc::new(RestateCoreProcessRunner::new(worker)),
             self.driver.process_registry(),
+            self.ingress.clone(),
         )
     }
 }
@@ -1856,6 +1878,14 @@ pub trait LashProcessWorkflow {
 
     #[shared]
     async fn cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
+
+    #[shared]
+    async fn deliver_cancel(request: Json<RestateProcessCancelRequest>) -> HandlerResult<Json<()>>;
+
+    #[shared]
+    async fn await_cancel(
+        request: Json<RestateProcessAwaitRequest>,
+    ) -> HandlerResult<Json<RestateProcessCancelSignal>>;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -1885,20 +1915,55 @@ pub struct RestateProcessAwaitRequest {
     pub process_id: String,
 }
 
+/// Terminal value for one process segment's durable cancellation observer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestateProcessCancelSignal {
+    /// The cancel endpoint accepted a request and wrote its durable registry event.
+    CancelRequested,
+    /// The segment ended normally, so its cancellation observer can retire.
+    SegmentFinished,
+}
+
 pub struct LashProcessWorkflowImpl<R> {
     runner: Arc<R>,
     registry: Arc<dyn ProcessRegistry>,
     segment_duration_cap: Option<Duration>,
     segment_effect_budget: Arc<dyn Fn(&ProcessRegistration) -> u64 + Send + Sync>,
+    cancel_ingress: Option<RestateIngressClient>,
+    #[cfg(test)]
+    cancel_read_failures: std::sync::atomic::AtomicUsize,
 }
 
 impl<R> LashProcessWorkflowImpl<R> {
-    pub fn new(runner: Arc<R>, registry: Arc<dyn ProcessRegistry>) -> Self {
+    /// Build a Restate process workflow whose live cancellation observer calls
+    /// back through the ingress to await its durable cancellation promise.
+    pub fn new(
+        runner: Arc<R>,
+        registry: Arc<dyn ProcessRegistry>,
+        cancel_ingress: RestateIngressClient,
+    ) -> Self {
+        Self::new_inner(runner, registry, Some(cancel_ingress))
+    }
+
+    #[cfg(test)]
+    fn new_for_test(runner: Arc<R>, registry: Arc<dyn ProcessRegistry>) -> Self {
+        Self::new_inner(runner, registry, None)
+    }
+
+    fn new_inner(
+        runner: Arc<R>,
+        registry: Arc<dyn ProcessRegistry>,
+        cancel_ingress: Option<RestateIngressClient>,
+    ) -> Self {
         Self {
             runner,
             registry,
             segment_duration_cap: None,
             segment_effect_budget: Arc::new(|_| 10_000),
+            cancel_ingress,
+            #[cfg(test)]
+            cancel_read_failures: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1918,20 +1983,62 @@ impl<R> LashProcessWorkflowImpl<R> {
         self.segment_effect_budget = Arc::new(selector);
         self
     }
+
+    fn cancellation_signal(
+        &self,
+        process_id: &str,
+        segment_ordinal: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>> {
+        let Some(ingress) = self.cancel_ingress.clone() else {
+            return Box::pin(std::future::pending());
+        };
+        let workflow_key = process_segment_workflow_key(process_id, segment_ordinal);
+        let request = RestateProcessAwaitRequest {
+            process_id: process_id.to_string(),
+        };
+        Box::pin(async move {
+            match ingress
+                .call_workflow_json::<_, RestateProcessCancelSignal>(
+                    "LashProcessWorkflow",
+                    &workflow_key,
+                    "await_cancel",
+                    &request,
+                )
+                .await
+                .map_err(HandlerError::from)
+            {
+                Ok(RestateProcessCancelSignal::CancelRequested) => Ok(()),
+                Ok(RestateProcessCancelSignal::SegmentFinished) => {
+                    std::future::pending::<Result<(), HandlerError>>().await
+                }
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    #[cfg(test)]
+    fn fail_next_cancel_reads(&self, count: usize) {
+        self.cancel_read_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl<R> LashProcessWorkflowImpl<R>
 where
     R: RestateProcessRunner,
 {
-    async fn run_registration(
+    async fn run_registration<F>(
         &self,
         registration: ProcessRegistration,
         execution_context: ProcessExecutionContext,
         scoped_effect_controller: ScopedEffectController<'_>,
         segment_ordinal: u64,
         handover: Option<lash_core::SegmentHandover>,
-    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
+        cancellation_signal: F,
+    ) -> Result<lash_core::ProcessRunOutcome, HandlerError>
+    where
+        F: Future<Output = Result<(), HandlerError>>,
+    {
         let process_id = registration.id.clone();
         // ADR 0019: refuse to re-execute an already-started OwnerBound row. A
         // fresh OwnerBound row has `first_started == None` (the runner records
@@ -1942,7 +2049,11 @@ where
         // no other owner may re-execute), so complete it as Abandoned instead and
         // return that output; the normal `run` tail then resolves the durable
         // promise so awaiters still unblock. Rerunnable rows are never affected.
-        if let Some(record) = self.registry.try_get_process(&process_id).await?
+        if let Some(record) = self
+            .registry
+            .try_get_process(&process_id)
+            .await
+            .map_err(retryable_registry_error)?
             && record.disposition == RecoveryDisposition::OwnerBound
             && record.first_started.is_some()
             && segment_ordinal == 0
@@ -1967,10 +2078,15 @@ where
                     output.clone(),
                     workflow_key_authority(&process_id),
                 )
-                .await?;
+                .await
+                .map_err(retryable_registry_error)?;
             return Ok(output.into());
         }
-        if self.process_cancel_requested(&process_id).await? {
+        if self
+            .process_cancel_requested(&process_id)
+            .await
+            .map_err(retryable_registry_error)?
+        {
             let output = ProcessAwaitOutput::Cancelled {
                 message: format!("process `{process_id}` was cancelled"),
                 raw: None,
@@ -1982,36 +2098,39 @@ where
                     output.clone(),
                     workflow_key_authority(&process_id),
                 )
-                .await?;
+                .await
+                .map_err(retryable_registry_error)?;
             return Ok(output.into());
         }
         let cancellation = tokio_util::sync::CancellationToken::new();
-        let cancel_watcher = {
-            let registry = Arc::clone(&self.registry);
-            let process_id = process_id.clone();
-            let cancellation = cancellation.clone();
-            tokio::spawn(async move {
-                let awaiter = lash_core::ProcessAwaiter::polling(registry);
-                if awaiter
-                    .await_event(&process_id, "process.cancel_requested", 0)
+        let runner = self.runner.run_process_segment(
+            registration,
+            execution_context,
+            scoped_effect_controller,
+            handover,
+            cancellation.clone(),
+        );
+        tokio::pin!(runner);
+        tokio::pin!(cancellation_signal);
+        let outcome = tokio::select! {
+            biased;
+            signal = &mut cancellation_signal => {
+                signal?;
+                cancellation.cancel();
+                self.confirm_process_cancel_requested(&process_id)
                     .await
-                    .is_ok()
-                {
-                    cancellation.cancel();
-                }
-            })
+                    .map_err(retryable_registry_error)?;
+                let _ = runner.await;
+                Ok(lash_core::ProcessRunOutcome::Terminal(Box::new(
+                    ProcessAwaitOutput::Cancelled {
+                        message: format!("process `{process_id}` was cancelled"),
+                        raw: None,
+                        control: None,
+                    },
+                )))
+            }
+            outcome = &mut runner => outcome
         };
-        let outcome = self
-            .runner
-            .run_process_segment(
-                registration,
-                execution_context,
-                scoped_effect_controller,
-                handover,
-                cancellation,
-            )
-            .await;
-        cancel_watcher.abort();
         match outcome {
             Ok(lash_core::ProcessRunOutcome::Terminal(output)) => {
                 self.registry
@@ -2020,7 +2139,8 @@ where
                         (*output).clone(),
                         workflow_key_authority(&process_id),
                     )
-                    .await?;
+                    .await
+                    .map_err(retryable_registry_error)?;
                 Ok(lash_core::ProcessRunOutcome::Terminal(output))
             }
             Ok(boundary @ lash_core::ProcessRunOutcome::SegmentBoundary(_)) => Ok(boundary),
@@ -2051,6 +2171,20 @@ where
     }
 
     async fn process_cancel_requested(&self, process_id: &str) -> Result<bool, PluginError> {
+        #[cfg(test)]
+        if self
+            .cancel_read_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(PluginError::Session(
+                "simulated transient cancel registry read failure".to_string(),
+            ));
+        }
         Ok(self
             .registry
             .events_after(process_id, 0)
@@ -2059,9 +2193,30 @@ where
             .any(|event| event.event_type == "process.cancel_requested"))
     }
 
-    async fn cancel_registration(
+    async fn confirm_process_cancel_requested(&self, process_id: &str) -> Result<(), PluginError> {
+        let mut last_error = None;
+        for attempt in 0..=PROCESS_CANCEL_CONFIRM_RETRIES {
+            match self.process_cancel_requested(process_id).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    return Err(PluginError::Session(format!(
+                        "process `{process_id}` cancellation promise resolved without a durable process.cancel_requested event"
+                    )));
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < PROCESS_CANCEL_CONFIRM_RETRIES {
+                        tokio::time::sleep(PROCESS_CANCEL_CONFIRM_RETRY_DELAY).await;
+                    }
+                }
+            }
+        }
+        Err(last_error.expect("cancel confirmation attempted at least once"))
+    }
+
+    async fn record_cancel_requested(
         &self,
-        request: RestateProcessCancelRequest,
+        request: &RestateProcessCancelRequest,
     ) -> Result<(), PluginError> {
         self.registry
             .append_event(
@@ -2071,7 +2226,16 @@ where
                     request.reason.clone(),
                 ),
             )
-            .await?;
+            .await
+            .map(|_| ())
+    }
+
+    #[cfg(test)]
+    async fn cancel_registration(
+        &self,
+        request: RestateProcessCancelRequest,
+    ) -> Result<(), PluginError> {
+        self.record_cancel_requested(&request).await?;
         self.runner.request_process_cancel(request).await
     }
 }
@@ -2183,6 +2347,7 @@ where
             let scoped_effect_controller = controller
                 .scoped_effect_controller(ExecutionScope::process(process_id.clone()))
                 .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+            let cancel_signal = self.cancellation_signal(&process_id, input.segment_ordinal);
             let outcome = self
                 .run_registration(
                     input.registration.clone(),
@@ -2190,9 +2355,9 @@ where
                     scoped_effect_controller,
                     input.segment_ordinal,
                     handover,
+                    cancel_signal,
                 )
-                .await
-                .map_err(HandlerError::from)?;
+                .await?;
             if let lash_core::ProcessRunOutcome::SegmentBoundary(boundary) = &outcome {
                 let current = self
                     .registry
@@ -2206,6 +2371,10 @@ where
             }
             break outcome;
         };
+        resolve_process_cancel_signal(
+            controller.context(),
+            RestateProcessCancelSignal::SegmentFinished,
+        )?;
         match outcome {
             lash_core::ProcessRunOutcome::Terminal(output) => {
                 let output = *output;
@@ -2341,13 +2510,61 @@ where
 
     async fn cancel(
         &self,
-        _ctx: SharedWorkflowContext<'_>,
+        ctx: SharedWorkflowContext<'_>,
         Json(request): Json<RestateProcessCancelRequest>,
     ) -> HandlerResult<Json<()>> {
-        self.cancel_registration(request)
+        self.record_cancel_requested(&request)
             .await
-            .map(Json)
-            .map_err(|err| TerminalError::from_error(err).into())
+            .map_err(retryable_registry_error)?;
+        resolve_process_cancel_signal(&ctx, RestateProcessCancelSignal::CancelRequested)?;
+
+        if let Some(handover) = self
+            .registry
+            .latest_segment_handover(&request.process_id)
+            .await
+            .map_err(retryable_registry_error)?
+            && handover.segment_ordinal > 0
+        {
+            let deliver: restate_sdk::context::Request<
+                '_,
+                Json<RestateProcessCancelRequest>,
+                Json<()>,
+            > = ContextClient::request(
+                &ctx,
+                RequestTarget::workflow(
+                    "LashProcessWorkflow",
+                    process_segment_workflow_key(&request.process_id, handover.segment_ordinal),
+                    "deliver_cancel",
+                ),
+                Json(request.clone()),
+            );
+            let Json(()) = deliver.call().await?;
+        }
+        self.runner
+            .request_process_cancel(request)
+            .await
+            .map_err(retryable_registry_error)?;
+        Ok(Json(()))
+    }
+
+    async fn deliver_cancel(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        Json(_request): Json<RestateProcessCancelRequest>,
+    ) -> HandlerResult<Json<()>> {
+        resolve_process_cancel_signal(&ctx, RestateProcessCancelSignal::CancelRequested)?;
+        Ok(Json(()))
+    }
+
+    async fn await_cancel(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+        Json(_request): Json<RestateProcessAwaitRequest>,
+    ) -> HandlerResult<Json<RestateProcessCancelSignal>> {
+        let payload = ctx.promise::<String>(PROCESS_CANCEL_PROMISE_KEY).await?;
+        let signal = serde_json::from_str(&payload)
+            .map_err(|err| HandlerError::from(TerminalError::from_error(err)))?;
+        Ok(Json(signal))
     }
 
     async fn await_terminal(

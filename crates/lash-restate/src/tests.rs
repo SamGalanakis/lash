@@ -3665,6 +3665,71 @@ struct SegmentedRecordingRunner {
     runs: AtomicUsize,
 }
 
+#[derive(Default)]
+struct CancellationAwareRunner {
+    started: tokio::sync::Notify,
+    finish_successfully: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct BlockingCancelSignalTransport {
+    requests: Mutex<Vec<HttpRequest>>,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl HttpTransport for BlockingCancelSignalTransport {
+    async fn send(
+        &self,
+        request: HttpRequest,
+        _timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpTransportError> {
+        self.requests.lock().expect("requests lock").push(request);
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: HttpResponseBody::buffered(r#""cancel_requested""#),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RestateProcessRunner for CancellationAwareRunner {
+    async fn run_process_segment(
+        &self,
+        _registration: ProcessRegistration,
+        _execution_context: ProcessExecutionContext,
+        _scoped_effect_controller: lash_core::ScopedEffectController<'_>,
+        _handover: Option<lash_core::SegmentHandover>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<lash_core::ProcessRunOutcome, PluginError> {
+        self.started.notify_one();
+        tokio::select! {
+            _ = cancellation.cancelled() => Ok(ProcessAwaitOutput::Cancelled {
+                message: "cancel signal observed".to_string(),
+                raw: None,
+                control: None,
+            }
+            .into()),
+            _ = self.finish_successfully.notified() => Ok(ProcessAwaitOutput::Success {
+                value: serde_json::json!("runner completed"),
+                control: None,
+            }
+            .into()),
+        }
+    }
+
+    async fn request_process_cancel(
+        &self,
+        _request: RestateProcessCancelRequest,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl RestateProcessRunner for SegmentedRecordingRunner {
     async fn run_process_segment(
@@ -3703,6 +3768,143 @@ fn inline_process_scope(process_id: &str) -> lash_core::ScopedEffectController<'
     .expect("inline process scope")
 }
 
+async fn pending_process_cancel_signal() -> Result<(), HandlerError> {
+    std::future::pending().await
+}
+
+#[tokio::test]
+async fn running_process_cancel_uses_native_signal_without_poll_delay() {
+    let runner = Arc::new(CancellationAwareRunner::default());
+    let registry = process_registry();
+    let signal_transport = Arc::new(BlockingCancelSignalTransport::default());
+    let cancel_ingress = RestateIngressClient::new(RestateConnection::with_transport(
+        "https://restate.invalid",
+        signal_transport.clone(),
+    ));
+    let workflow = Arc::new(LashProcessWorkflowImpl::new(
+        Arc::clone(&runner),
+        Arc::clone(&registry),
+        cancel_ingress,
+    ));
+    let registration = rerunnable_registration("prompt-cancel");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register process");
+
+    let run = {
+        let workflow = Arc::clone(&workflow);
+        tokio::spawn(async move {
+            let cancellation_signal = workflow.cancellation_signal("prompt-cancel", 0);
+            workflow
+                .run_registration(
+                    registration,
+                    ProcessExecutionContext::default(),
+                    inline_process_scope("prompt-cancel"),
+                    0,
+                    None,
+                    cancellation_signal,
+                )
+                .await
+        })
+    };
+    runner.started.notified().await;
+    signal_transport.started.notified().await;
+    registry
+        .append_event(
+            "prompt-cancel",
+            lash_core::ProcessEventAppendRequest::cancel_requested(
+                "prompt-cancel",
+                Some("stop promptly".to_string()),
+            ),
+        )
+        .await
+        .expect("append cancel request");
+    signal_transport.release.notify_one();
+
+    let outcome = tokio::time::timeout(Duration::from_millis(20), run)
+        .await
+        .expect("accepted cancel must not wait for the 25ms polling floor")
+        .expect("join running process")
+        .expect("run process");
+    assert!(matches!(
+        outcome,
+        lash_core::ProcessRunOutcome::Terminal(output)
+            if matches!(*output, ProcessAwaitOutput::Cancelled { .. })
+    ));
+    let requests = signal_transport.requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://restate.invalid/LashProcessWorkflow/prompt-cancel/await_cancel"
+    );
+}
+
+#[tokio::test]
+async fn transient_cancel_registry_read_error_cannot_fall_through_to_success() {
+    let runner = Arc::new(CancellationAwareRunner::default());
+    let registry = process_registry();
+    let workflow = Arc::new(LashProcessWorkflowImpl::new_for_test(
+        Arc::clone(&runner),
+        Arc::clone(&registry),
+    ));
+    let registration = rerunnable_registration("transient-cancel-read");
+    registry
+        .register_process(registration.clone())
+        .await
+        .expect("register process");
+
+    let (signal, cancellation_signal) = tokio::sync::oneshot::channel();
+    let run = {
+        let workflow = Arc::clone(&workflow);
+        tokio::spawn(async move {
+            workflow
+                .run_registration(
+                    registration,
+                    ProcessExecutionContext::default(),
+                    inline_process_scope("transient-cancel-read"),
+                    0,
+                    None,
+                    async move {
+                        cancellation_signal.await.map_err(|_| {
+                            HandlerError::from(TerminalError::new(
+                                "test cancellation signal sender dropped",
+                            ))
+                        })
+                    },
+                )
+                .await
+        })
+    };
+    runner.started.notified().await;
+    registry
+        .append_event(
+            "transient-cancel-read",
+            lash_core::ProcessEventAppendRequest::cancel_requested(
+                "transient-cancel-read",
+                Some("retry the durable read".to_string()),
+            ),
+        )
+        .await
+        .expect("append cancel request");
+    workflow.fail_next_cancel_reads(1);
+    signal
+        .send(())
+        .expect("resolve process cancellation signal");
+    runner.finish_successfully.notify_one();
+
+    let outcome = tokio::time::timeout(Duration::from_millis(100), run)
+        .await
+        .expect("transient registry error must be retried")
+        .expect("join running process")
+        .expect("run process");
+    assert!(matches!(
+        outcome,
+        lash_core::ProcessRunOutcome::Terminal(output)
+            if matches!(*output, ProcessAwaitOutput::Cancelled { .. })
+    ));
+}
+
 #[tokio::test]
 async fn durable_segment_handover_resumes_once_and_terminalizes_once() {
     let continuation = lash_core::SegmentHandover {
@@ -3723,7 +3925,7 @@ async fn durable_segment_handover_resumes_once_and_terminalizes_once() {
         runs: AtomicUsize::new(0),
     });
     let registry = process_registry();
-    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let workflow = LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone());
     let registration = rerunnable_registration("segmented-durable");
     let _record = registry
         .register_process(registration.clone())
@@ -3741,6 +3943,7 @@ async fn durable_segment_handover_resumes_once_and_terminalizes_once() {
                 .expect("durable first-segment scope"),
             0,
             None,
+            pending_process_cancel_signal(),
         )
         .await
         .expect("run first segment");
@@ -3784,6 +3987,7 @@ async fn durable_segment_handover_resumes_once_and_terminalizes_once() {
                 .expect("durable successor scope"),
             1,
             Some(resumed),
+            pending_process_cancel_signal(),
         )
         .await
         .expect("run successor segment");
@@ -3870,7 +4074,8 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
             handovers: Mutex::new(Vec::new()),
             runs: AtomicUsize::new(0),
         });
-        let workflow = LashProcessWorkflowImpl::new(Arc::clone(&runner), Arc::clone(&registry));
+        let workflow =
+            LashProcessWorkflowImpl::new_for_test(Arc::clone(&runner), Arc::clone(&registry));
         let mut input_handover = None;
         let mut successor_keys = HashSet::new();
 
@@ -3970,6 +4175,7 @@ async fn restate_segment_transition_replay_matrix_preserves_lineage_invariants()
                     inline_process_scope(&process_id),
                     ordinal,
                     input_handover.take(),
+                    pending_process_cancel_signal(),
                 )
                 .await
                 .expect("matrix segment run");
@@ -4144,7 +4350,7 @@ async fn segment_program_hash_mismatch_is_typed_and_cancel_skips_successor_engin
         runs: AtomicUsize::new(0),
     });
     let registry = process_registry();
-    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let workflow = LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone());
     let registration = rerunnable_registration("cancel-between-segments");
     registry
         .register_process(registration.clone())
@@ -4171,6 +4377,7 @@ async fn segment_program_hash_mismatch_is_typed_and_cancel_skips_successor_engin
                 program_hash: Some("program-v1".to_string()),
                 engine_state: vec![1],
             }),
+            pending_process_cancel_signal(),
         )
         .await
         .expect("cancelled successor");
@@ -4230,7 +4437,7 @@ async fn process_workflow_endpoint_smoke_schedules_runs_and_cancels_process() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
     let endpoint = Endpoint::builder()
-        .bind(LashProcessWorkflowImpl::new(runner.clone(), registry.clone()).serve())
+        .bind(LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone()).serve())
         .build();
     let context = Arc::new(RecordingContext::with_endpoint(endpoint));
     let host = RestateRuntimeEffectController::new(context.clone());
@@ -4655,7 +4862,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
         .expect("create root session store before wake delivery");
     let endpoint_a = Endpoint::builder()
         .bind(
-            LashProcessWorkflowImpl::new(
+            LashProcessWorkflowImpl::new_for_test(
                 Arc::new(RestateCoreProcessRunner::new(worker_a)),
                 Arc::clone(&registry_a),
             )
@@ -4766,7 +4973,7 @@ async fn sqlite_process_recovery_reopens_registry_worker_grants_wakes_and_cancel
     let worker_b = recovery_worker(Arc::clone(&registry_b), store_factory);
     let endpoint_b = Endpoint::builder()
         .bind(
-            LashProcessWorkflowImpl::new(
+            LashProcessWorkflowImpl::new_for_test(
                 Arc::new(RestateCoreProcessRunner::new(worker_b)),
                 Arc::clone(&registry_b),
             )
@@ -5347,7 +5554,7 @@ fn discover_service<S: Discoverable>(_: &S) -> restate_sdk::discovery::Service {
 async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
-    let service = LashProcessWorkflowImpl::new(runner, registry).serve();
+    let service = LashProcessWorkflowImpl::new_for_test(runner, registry).serve();
     let discovery = discover_service(&service);
     let wait_workflow = LashDurableWaitWorkflowImpl.serve();
     let wait_workflow_discovery = discover_service(&wait_workflow);
@@ -5364,7 +5571,7 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         discovery.ty.to_string(),
         restate_sdk::discovery::ServiceType::Workflow.to_string()
     );
-    assert_eq!(discovery.handlers.len(), 4);
+    assert_eq!(discovery.handlers.len(), 6);
 
     let run = discovery
         .handlers
@@ -5386,6 +5593,16 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         .iter()
         .find(|handler| handler.name.to_string() == "complete_terminal")
         .expect("complete_terminal handler discovery");
+    let deliver_cancel = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.to_string() == "deliver_cancel")
+        .expect("deliver_cancel handler discovery");
+    let await_cancel = discovery
+        .handlers
+        .iter()
+        .find(|handler| handler.name.to_string() == "await_cancel")
+        .expect("await_cancel handler discovery");
 
     assert_eq!(
         run.ty.as_ref().map(ToString::to_string).as_deref(),
@@ -5409,6 +5626,18 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
             .as_ref()
             .map(ToString::to_string)
             .as_deref(),
+        Some("SHARED")
+    );
+    assert_eq!(
+        deliver_cancel
+            .ty
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("SHARED")
+    );
+    assert_eq!(
+        await_cancel.ty.as_ref().map(ToString::to_string).as_deref(),
         Some("SHARED")
     );
 
@@ -5461,6 +5690,16 @@ async fn restate_workflows_and_wait_index_bind_with_required_handlers() {
         handlers
             .iter()
             .any(|handler| { handler["name"] == "complete_terminal" && handler["ty"] == "SHARED" })
+    );
+    assert!(
+        handlers
+            .iter()
+            .any(|handler| { handler["name"] == "deliver_cancel" && handler["ty"] == "SHARED" })
+    );
+    assert!(
+        handlers
+            .iter()
+            .any(|handler| { handler["name"] == "await_cancel" && handler["ty"] == "SHARED" })
     );
     assert_eq!(
         wait_workflow_discovery.name.to_string(),
@@ -5547,7 +5786,7 @@ async fn process_deployment_driver_and_workflow_share_registry() {
 async fn process_workflow_impl_runs_and_cancels_through_runner() {
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
-    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let workflow = LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone());
     // The workflow only ever runs lash-executed rows: `submit_record` refuses to
     // POST an ExternallyOwned row, and the registry rejects a workflow-key
     // completion of one (ADR 0027) — so the fixture is Rerunnable.
@@ -5572,6 +5811,7 @@ async fn process_workflow_impl_runs_and_cancels_through_runner() {
             .expect("inline process scope"),
             0,
             None,
+            pending_process_cancel_signal(),
         )
         .await
         .expect("workflow run");
@@ -5620,7 +5860,7 @@ async fn run_registration_abandons_restarted_owner_bound_without_running() {
     // that output so the durable promise still resolves for awaiters.
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
-    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let workflow = LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone());
     let registration = owner_bound_registration("ob-restart");
     registry
         .register_process(registration.clone())
@@ -5650,6 +5890,7 @@ async fn run_registration_abandons_restarted_owner_bound_without_running() {
             .expect("inline process scope"),
             0,
             None,
+            pending_process_cancel_signal(),
         )
         .await
         .expect("run_registration");
@@ -5688,7 +5929,7 @@ async fn run_registration_runs_fresh_owner_bound() {
     // the runner executes normally on the first invocation.
     let runner = Arc::new(RecordingRunner::default());
     let registry = process_registry();
-    let workflow = LashProcessWorkflowImpl::new(runner.clone(), registry.clone());
+    let workflow = LashProcessWorkflowImpl::new_for_test(runner.clone(), registry.clone());
     let registration = owner_bound_registration("ob-fresh");
     registry
         .register_process(registration.clone())
@@ -5706,6 +5947,7 @@ async fn run_registration_runs_fresh_owner_bound() {
             .expect("inline process scope"),
             0,
             None,
+            pending_process_cancel_signal(),
         )
         .await
         .expect("run_registration");
