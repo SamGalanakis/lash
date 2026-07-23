@@ -142,6 +142,8 @@ mod tests {
 
     #[tokio::test]
     async fn in_memory_trigger_store_satisfies_conformance() {
+        // Independent in-memory instances cannot reopen shared state, so the
+        // durable-only `trigger_store_reopenable` vector is genuinely N/A.
         trigger_store(
             || Arc::new(crate::InMemoryTriggerStore::default()) as Arc<dyn crate::TriggerStore>,
             DurabilityTier::Inline,

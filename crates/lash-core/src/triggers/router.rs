@@ -27,21 +27,6 @@ pub fn trigger_subscription_definition_hash(
     .map_err(|err| PluginError::Session(format!("failed to hash trigger definition: {err}")))
 }
 
-pub fn derived_subscription_key(
-    process_name: &str,
-    source_type: &str,
-    source_key: &str,
-) -> Result<String, PluginError> {
-    let digest = crate::stable_hash::length_framed_sha256_hex(&[
-        "lash.trigger-subscription-key",
-        "1",
-        process_name,
-        source_type,
-        source_key,
-    ]);
-    Ok(format!("derived/v1/{digest}"))
-}
-
 pub(super) fn reserve_in_memory_for_occurrence(
     state: &mut InMemoryTriggerEventState,
     occurrence: &TriggerOccurrenceRecord,

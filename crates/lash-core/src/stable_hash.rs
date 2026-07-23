@@ -29,15 +29,6 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
-pub(crate) fn length_framed_sha256_hex(parts: &[&str]) -> String {
-    let mut hasher = sha2::Sha256::new();
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part.as_bytes());
-    }
-    format!("{:x}", hasher.finalize())
-}
-
 pub(crate) fn stable_json_sha256_hex<T>(value: &T) -> Result<String, serde_json::Error>
 where
     T: Serialize + ?Sized,

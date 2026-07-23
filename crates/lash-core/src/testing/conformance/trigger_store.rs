@@ -8,7 +8,7 @@ where
     F: Fn() -> Arc<dyn crate::TriggerStore>,
 {
     trigger_store_reports_declared_tier(make(), expected_tier);
-    trigger_source_key_and_derived_subscription_key_are_stable();
+    trigger_source_key_and_subscription_identity_are_stable();
     same_owner_key_definition_is_idempotent(make()).await;
     changed_register_conflicts_and_update_is_cas(make()).await;
     committed_mutation_receipt_survives_later_revision(make()).await;
@@ -179,14 +179,11 @@ fn trigger_store_reports_declared_tier(
     assert_eq!(store.durability_tier(), expected);
 }
 
-fn trigger_source_key_and_derived_subscription_key_are_stable() {
+fn trigger_source_key_and_subscription_identity_are_stable() {
     let source = serde_json::json!({ "button": "Blue" });
     let first = crate::default_trigger_source_key("ui.button.pressed", &source).unwrap();
     let second = crate::default_trigger_source_key("ui.button.pressed", &source).unwrap();
     assert_eq!(first, second);
-    let key_a = crate::derived_subscription_key("worker", "ui.button.pressed", &first).unwrap();
-    let key_b = crate::derived_subscription_key("worker", "ui.button.pressed", &second).unwrap();
-    assert_eq!(key_a, key_b);
     assert_ne!(
         crate::deterministic_subscription_id(&owner("session-a"), "ab:c").unwrap(),
         crate::deterministic_subscription_id(&owner("session-a"), "a:bc").unwrap()
